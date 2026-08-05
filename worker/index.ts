@@ -54,6 +54,62 @@ const worker = {
       }
     }
 
+    if (url.pathname.startsWith("/api/esign/status/") && request.method === "GET") {
+      if (!env.ESIGN_CLIENT_ID || !env.ESIGN_SECRET_KEY) {
+        return Response.json({ message: "Máy chủ chưa được cấu hình thông tin kết nối API ký số." }, { status: 500 });
+      }
+      const signRequestId = decodeURIComponent(url.pathname.slice("/api/esign/status/".length));
+      if (!signRequestId) {
+        return Response.json({ message: "Thiếu mã yêu cầu ký." }, { status: 400 });
+      }
+      try {
+        const apiBase = (env.ESIGN_API_URL || "https://sandbox.bankhub.dev/esign/push-request-document")
+          .replace(/\/push-request-document\/?$/, "");
+        const upstream = await fetch(`${apiBase}/requests/${encodeURIComponent(signRequestId)}/status`, {
+          method: "GET",
+          headers: {
+            "x-client-id": env.ESIGN_CLIENT_ID,
+            "x-secret-key": env.ESIGN_SECRET_KEY,
+            "Content-Type": "application/json",
+          },
+        });
+        const contentType = upstream.headers.get("content-type") || "application/json";
+        const payload = await upstream.arrayBuffer();
+        return new Response(payload, { status: upstream.status, headers: { "content-type": contentType } });
+      } catch (error) {
+        return Response.json({ message: error instanceof Error ? error.message : "Không thể lấy trạng thái ký." }, { status: 502 });
+      }
+    }
+
+    if (url.pathname === "/api/esign/signed-file" && request.method === "GET") {
+      const signedFileUrl = url.searchParams.get("url");
+      if (!signedFileUrl) {
+        return Response.json({ message: "Thiếu đường dẫn file đã ký." }, { status: 400 });
+      }
+      try {
+        const target = new URL(signedFileUrl);
+        const allowedHost = target.protocol === "https:" && (
+          target.hostname === "s3.hn-2.cloud.cmctelecom.vn" || target.hostname.endsWith(".cloud.cmctelecom.vn")
+        );
+        if (!allowedHost) {
+          return Response.json({ message: "Đường dẫn file đã ký không hợp lệ." }, { status: 400 });
+        }
+        const upstream = await fetch(target.toString());
+        if (!upstream.ok) {
+          return Response.json({ message: "Không thể tải file đã ký từ hệ thống lưu trữ." }, { status: upstream.status });
+        }
+        return new Response(upstream.body, {
+          status: 200,
+          headers: {
+            "content-type": upstream.headers.get("content-type") || "application/pdf",
+            "cache-control": "no-store",
+          },
+        });
+      } catch {
+        return Response.json({ message: "Không thể tải file đã ký." }, { status: 502 });
+      }
+    }
+
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
       return handleImageOptimization(request, {

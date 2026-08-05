@@ -4,10 +4,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
   ChevronDown,
+  Download,
   FileText,
   GripVertical,
   LoaderCircle,
   Plus,
+  RefreshCw,
   Send,
   Trash2,
   UploadCloud,
@@ -32,6 +34,17 @@ type FormState = {
   taxCode: string;
 };
 
+type SignStatusResponse = {
+  signRequestStatus?: {
+    signRequestId?: string;
+    state?: string;
+    lastUpdatedAt?: string;
+    signedAt?: string;
+    signedFileUrl?: string;
+    expiresIn?: number;
+  };
+};
+
 const initialForm: FormState = {
   signRequestId: "",
   identificationNumber: "",
@@ -40,23 +53,25 @@ const initialForm: FormState = {
   taxCode: "",
 };
 
-const defaultField = (page = 1): SignatureField => ({
+const defaultField = (page = 1, index = 0): SignatureField => ({
   id: crypto.randomUUID(),
   page,
   xRatio: 0.56,
-  yRatio: 0.76,
+  yRatio: Math.min(0.82, 0.7 + (index % 3) * 0.1),
   widthRatio: 0.3,
-  heightRatio: 0.095,
+  heightRatio: 0.1,
   fieldType: "SIGNATURE",
 });
 
-function PdfPage({ pdf, pageNumber, fields, selectedId, onSelect, onMove }: {
+function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove, onResize }: {
   pdf: any;
   pageNumber: number;
   fields: SignatureField[];
   selectedId: string | null;
+  locked: boolean;
   onSelect: (id: string) => void;
   onMove: (id: string, x: number, y: number) => void;
+  onResize: (id: string, width: number, height: number) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -88,6 +103,7 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, onSelect, onMove }: {
   }, [pdf, pageNumber]);
 
   const startDrag = (event: React.PointerEvent, field: SignatureField) => {
+    if (locked) return;
     event.preventDefault();
     onSelect(field.id);
     const pageEl = pageRef.current;
@@ -108,8 +124,29 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, onSelect, onMove }: {
     window.addEventListener("pointerup", stop);
   };
 
+  const startResize = (event: React.PointerEvent, field: SignatureField) => {
+    if (locked) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect(field.id);
+    const pageEl = pageRef.current;
+    if (!pageEl) return;
+    const rect = pageEl.getBoundingClientRect();
+    const resize = (e: PointerEvent) => {
+      const width = Math.max(0.16, Math.min(1 - field.xRatio, (e.clientX - rect.left) / rect.width - field.xRatio));
+      const height = Math.max(0.055, Math.min(0.22, (e.clientY - rect.top) / rect.height - field.yRatio));
+      onResize(field.id, width, height);
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", resize);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", resize);
+    window.addEventListener("pointerup", stop);
+  };
+
   return (
-    <div className="pdf-page-wrap">
+    <div className="pdf-page-wrap" id={`pdf-page-${pageNumber}`}>
       <div className="page-number">Trang {pageNumber}</div>
       <div className="pdf-page" ref={pageRef}>
         <canvas ref={canvasRef} />
@@ -117,7 +154,7 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, onSelect, onMove }: {
           <button
             type="button"
             key={field.id}
-            className={`signature-box ${selectedId === field.id ? "selected" : ""}`}
+            className={`signature-box ${selectedId === field.id ? "selected" : ""} ${locked ? "locked" : ""}`}
             style={{
               left: `${field.xRatio * 100}%`,
               top: `${field.yRatio * 100}%`,
@@ -125,10 +162,12 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, onSelect, onMove }: {
               height: `${field.heightRatio * 100}%`,
             }}
             onPointerDown={(e) => startDrag(e, field)}
+            disabled={locked}
             aria-label={`Vùng ký ${index + 1} trên trang ${pageNumber}`}
           >
             <GripVertical size={16} />
-            <span>Vị trí ký</span>
+            <span>Chữ ký {index + 1}</span>
+            <span className="resize-handle" onPointerDown={(e) => startResize(e, field)} aria-hidden="true" />
           </button>
         ))}
       </div>
@@ -138,22 +177,103 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, onSelect, onMove }: {
 
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const documentScrollRef = useRef<HTMLDivElement>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollingIdRef = useRef<string | null>(null);
   const [form, setForm] = useState(initialForm);
   const [file, setFile] = useState<File | null>(null);
   const [pdf, setPdf] = useState<any>(null);
   const [pageCount, setPageCount] = useState(0);
   const [fields, setFields] = useState<SignatureField[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [targetPage, setTargetPage] = useState(1);
   const [loadingPdf, setLoadingPdf] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [status, setStatus] = useState<"draft" | "sent" | "error">("draft");
+  const [status, setStatus] = useState<"draft" | "sent" | "processing" | "completed" | "rejected" | "error">("draft");
   const [message, setMessage] = useState("");
+  const [signedAt, setSignedAt] = useState("");
+  const [isSignedPreview, setIsSignedPreview] = useState(false);
 
   const selected = useMemo(() => fields.find((item) => item.id === selectedId), [fields, selectedId]);
+  const isFileLocked = status === "sent" || status === "processing" || submitting;
+
+  useEffect(() => () => {
+    pollingIdRef.current = null;
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+  }, []);
+
+  const replaceWithSignedPdf = async (url: string, signRequestId: string) => {
+    const response = await fetch(`/api/esign/signed-file?url=${encodeURIComponent(url)}`, { cache: "no-store" });
+    if (!response.ok) throw new Error("Không thể tải bản PDF đã ký để hiển thị.");
+    const blob = await response.blob();
+    const signedFile = new File([blob], `${signRequestId}-signed.pdf`, { type: "application/pdf" });
+    const pdfjs = await import("pdfjs-dist");
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+    const loaded = await pdfjs.getDocument({ data: await signedFile.arrayBuffer() }).promise;
+    setFile(signedFile);
+    setPdf(loaded);
+    setPageCount(loaded.numPages);
+    setFields([]);
+    setSelectedId(null);
+    setIsSignedPreview(true);
+  };
+
+  const pollStatus = async (signRequestId: string) => {
+    if (pollingIdRef.current !== signRequestId) return;
+    try {
+      const response = await fetch(`/api/esign/status/${encodeURIComponent(signRequestId)}`, { cache: "no-store" });
+      const result = await response.json() as SignStatusResponse & { message?: string; error?: string };
+      if (!response.ok) throw new Error(result.message || result.error || "Không thể lấy trạng thái ký.");
+      const signStatus = result.signRequestStatus;
+      const nextState = signStatus?.state?.toUpperCase();
+      if (nextState === "COMPLETED" && signStatus?.signedFileUrl) {
+        pollingIdRef.current = null;
+        try {
+          await replaceWithSignedPdf(signStatus.signedFileUrl, signRequestId);
+          setStatus("completed");
+          setSignedAt(signStatus.signedAt || "");
+          setMessage("Tài liệu đã ký hoàn tất. Bản xem trước đã được cập nhật.");
+        } catch (error) {
+          setStatus("completed");
+          setMessage(error instanceof Error ? error.message : "Đã ký xong nhưng chưa thể hiển thị file đã ký.");
+        }
+        return;
+      }
+      if (nextState === "COMPLETED") {
+        pollingIdRef.current = null;
+        setStatus("completed");
+        setSignedAt(signStatus?.signedAt || "");
+        setMessage("Tài liệu đã ký hoàn tất nhưng API chưa trả về đường dẫn file đã ký.");
+        return;
+      }
+      if (["REJECTED", "FAILED", "CANCELLED", "EXPIRED"].includes(nextState || "")) {
+        pollingIdRef.current = null;
+        setStatus(nextState === "REJECTED" ? "rejected" : "error");
+        setMessage(nextState === "REJECTED" ? "Người ký đã từ chối yêu cầu ký." : `Yêu cầu ký đã kết thúc với trạng thái ${nextState}.`);
+        return;
+      }
+      setStatus("processing");
+      setMessage(`Đang chờ ký${nextState ? ` · ${nextState}` : ""}. Tự động kiểm tra lại sau 5 giây.`);
+    } catch (error) {
+      setStatus("processing");
+      setMessage(`${error instanceof Error ? error.message : "Chưa lấy được trạng thái."} Sẽ thử lại sau 5 giây.`);
+    }
+    if (pollingIdRef.current === signRequestId) {
+      pollTimerRef.current = setTimeout(() => pollStatus(signRequestId), 5000);
+    }
+  };
+
+  const startPolling = (signRequestId: string) => {
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    pollingIdRef.current = signRequestId;
+    setSignedAt("");
+    setMessage("Hồ sơ đã gửi. Lần kiểm tra trạng thái đầu tiên sẽ bắt đầu sau 15 giây.");
+    pollTimerRef.current = setTimeout(() => void pollStatus(signRequestId), 15000);
+  };
 
   const setValue = (key: keyof FormState, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }));
-    setStatus("draft");
+    if (!["sent", "processing", "completed"].includes(status)) setStatus("draft");
   };
 
   const loadFile = async (nextFile: File) => {
@@ -172,9 +292,11 @@ export default function Home() {
       setFile(nextFile);
       setPdf(loaded);
       setPageCount(loaded.numPages);
+      setIsSignedPreview(false);
       const first = defaultField(1);
       setFields([first]);
       setSelectedId(first.id);
+      setTargetPage(1);
       if (!form.documentName) setForm((prev) => ({ ...prev, documentName: nextFile.name.replace(/\.pdf$/i, "") }));
     } catch {
       setStatus("error");
@@ -186,9 +308,11 @@ export default function Home() {
 
   const addField = () => {
     if (!pageCount) return;
-    const item = defaultField(selected?.page || 1);
+    const existingOnPage = fields.filter((field) => field.page === targetPage).length;
+    const item = defaultField(targetPage, existingOnPage);
     setFields((prev) => [...prev, item]);
     setSelectedId(item.id);
+    requestAnimationFrame(() => document.getElementById(`pdf-page-${targetPage}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
   };
 
   const updateField = (id: string, patch: Partial<SignatureField>) => {
@@ -201,9 +325,57 @@ export default function Home() {
     setSelectedId(null);
   };
 
+  const createNewRequest = () => {
+    pollingIdRef.current = null;
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    setFile(null);
+    setPdf(null);
+    setPageCount(0);
+    setFields([]);
+    setSelectedId(null);
+    setTargetPage(1);
+    setStatus("draft");
+    setMessage("");
+    setSignedAt("");
+    setIsSignedPreview(false);
+    if (inputRef.current) inputRef.current.value = "";
+  };
+
+  const downloadSignedPdf = () => {
+    if (!file || !isSignedPreview) return;
+    const objectUrl = URL.createObjectURL(file);
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = file.name || `${form.signRequestId}-signed.pdf`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  };
+
+  const detectVisiblePage = () => {
+    const scrollArea = documentScrollRef.current;
+    if (!scrollArea || !pageCount || isSignedPreview) return;
+    const viewport = scrollArea.getBoundingClientRect();
+    let bestPage = targetPage;
+    let bestVisibleHeight = -1;
+    for (let page = 1; page <= pageCount; page += 1) {
+      const element = document.getElementById(`pdf-page-${page}`);
+      if (!element) continue;
+      const rect = element.getBoundingClientRect();
+      const visibleHeight = Math.max(0, Math.min(rect.bottom, viewport.bottom) - Math.max(rect.top, viewport.top));
+      if (visibleHeight > bestVisibleHeight) {
+        bestVisibleHeight = visibleHeight;
+        bestPage = page;
+      }
+    }
+    if (bestPage !== targetPage) setTargetPage(bestPage);
+  };
+
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!file || fields.length === 0 || Object.values(form).some((value) => !value.trim())) {
+    const requiredValues = [form.signRequestId, form.identificationNumber, form.documentName, form.organizationName];
+    if (!file || fields.length === 0 || requiredValues.some((value) => !value.trim())) {
       setStatus("error");
       setMessage("Vui lòng nhập đủ thông tin, chọn PDF và đặt ít nhất một vùng ký.");
       return;
@@ -212,14 +384,20 @@ export default function Home() {
     setMessage("");
     try {
       const body = new FormData();
-      Object.entries(form).forEach(([key, value]) => body.append(key, value.trim()));
-      body.append("signatureFields", JSON.stringify(fields.map(({ id: _id, ...field }) => field)));
+      Object.entries(form).forEach(([key, value]) => {
+        const trimmed = value.trim();
+        if (trimmed) body.append(key, trimmed);
+      });
+      body.append("signatureFields", JSON.stringify(fields.map(({ id: _id, ...field }) => ({
+        ...field,
+        yRatio: Math.max(0, Math.min(1, 1 - field.yRatio - field.heightRatio)),
+      }))));
       body.append("file", file);
       const response = await fetch("/api/esign", { method: "POST", body });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result?.message || result?.error || "Dịch vụ ký số chưa phản hồi thành công.");
       setStatus("sent");
-      setMessage("Hồ sơ đã được gửi sang hệ thống ký số.");
+      startPolling(form.signRequestId.trim());
     } catch (error) {
       setStatus("error");
       setMessage(error instanceof Error ? error.message : "Không thể gửi yêu cầu ký.");
@@ -237,8 +415,9 @@ export default function Home() {
         </div>
         <div className={`status-pill ${status}`}>
           <span className="status-dot" />
-          {status === "sent" ? "Đã gửi yêu cầu" : status === "error" ? "Cần kiểm tra" : "Bản nháp"}
+          {status === "completed" ? "Ký hoàn tất" : status === "rejected" ? "Từ chối ký" : status === "processing" ? "Đang xử lý" : status === "sent" ? "Đã gửi yêu cầu" : status === "error" ? "Cần kiểm tra" : "Bản nháp"}
         </div>
+        <div className="topbar-spacer" aria-hidden="true" />
       </header>
 
       <form className="workspace" onSubmit={submit}>
@@ -249,11 +428,11 @@ export default function Home() {
           </div>
 
           <div className="fields-grid">
-            <label>Mã yêu cầu ký <em>*</em><input value={form.signRequestId} onChange={(e) => setValue("signRequestId", e.target.value)} placeholder="VD: C-TEST-019" /></label>
-            <label>Số giấy tờ <em>*</em><input value={form.identificationNumber} onChange={(e) => setValue("identificationNumber", e.target.value)} placeholder="CCCD / CMND" inputMode="numeric" /></label>
-            <label>Tên tài liệu <em>*</em><input value={form.documentName} onChange={(e) => setValue("documentName", e.target.value)} placeholder="Biên bản đối soát" /></label>
-            <label>Tên tổ chức <em>*</em><input value={form.organizationName} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Công ty TNHH..." /></label>
-            <label>Mã số thuế <em>*</em><input value={form.taxCode} onChange={(e) => setValue("taxCode", e.target.value)} placeholder="Nhập mã số thuế" inputMode="numeric" /></label>
+            <label><span>Mã yêu cầu <em>*</em></span><input value={form.signRequestId} onChange={(e) => setValue("signRequestId", e.target.value)} placeholder="VD: C-TEST-019" /></label>
+            <label><span>Số giấy tờ <em>*</em></span><input value={form.identificationNumber} onChange={(e) => setValue("identificationNumber", e.target.value)} placeholder="CCCD / CMND" inputMode="numeric" /></label>
+            <label className="wide-field"><span>Tên tài liệu <em>*</em></span><input value={form.documentName} onChange={(e) => setValue("documentName", e.target.value)} placeholder="Biên bản đối soát" /></label>
+            <label className="wide-field"><span>Tên tổ chức <em>*</em></span><input value={form.organizationName} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Công ty TNHH..." /></label>
+            <label className="wide-field"><span>Mã số thuế <small className="optional-label">Không bắt buộc</small></span><input value={form.taxCode} onChange={(e) => setValue("taxCode", e.target.value)} placeholder="Có thể để trống" inputMode="numeric" /></label>
           </div>
 
           <div className="section-divider" />
@@ -270,28 +449,33 @@ export default function Home() {
             <div className="file-card">
               <div className="file-icon"><FileText size={20} /></div>
               <div className="file-info"><strong>{file.name}</strong><span>{(file.size / 1024 / 1024).toFixed(2)} MB · {pageCount} trang</span></div>
-              <button type="button" onClick={() => { setFile(null); setPdf(null); setFields([]); setPageCount(0); }} aria-label="Bỏ file"><X size={17} /></button>
+              <button type="button" disabled={isFileLocked} onClick={() => { setFile(null); setPdf(null); setFields([]); setPageCount(0); setIsSignedPreview(false); setSignedAt(""); }} aria-label="Bỏ file"><X size={17} /></button>
             </div>
           )}
 
-          {file && <button className="add-signature" type="button" onClick={addField}><Plus size={17} /> Thêm vùng ký</button>}
-
           {selected && (
             <div className="field-editor">
-              <div><strong>Vùng ký đang chọn</strong><button type="button" onClick={() => removeField(selected.id)}><Trash2 size={16} /> Xoá</button></div>
-              <label>Đặt tại trang
-                <div className="select-wrap"><select value={selected.page} onChange={(e) => updateField(selected.id, { page: Number(e.target.value) })}>{Array.from({ length: pageCount }, (_, i) => <option key={i + 1} value={i + 1}>Trang {i + 1}</option>)}</select><ChevronDown size={16} /></div>
-              </label>
-              <p>Kéo khung màu xanh trên tài liệu để đặt đúng vị trí cần ký.</p>
+              <div><strong>Đang chọn: vùng {fields.findIndex((field) => field.id === selected.id) + 1}</strong><button type="button" disabled={isFileLocked} onClick={() => removeField(selected.id)}><Trash2 size={16} /> Xoá</button></div>
+              <p>{isFileLocked ? "Vùng ký đã được khoá trong lúc chờ xử lý." : "Kéo cả khung để di chuyển · kéo chấm ở góc phải dưới để đổi kích thước."}</p>
             </div>
           )}
 
           <div className="submit-area">
             {message && <div className={`notice ${status}`}><CheckCircle2 size={17} /> <span>{message}</span></div>}
-            <button className="submit-button" disabled={submitting} type="submit">
-              {submitting ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}
-              {submitting ? "Đang gửi..." : "Gửi yêu cầu ký"}
-            </button>
+            {status === "completed" && signedAt && <div className="signed-time">Ký lúc {new Date(signedAt).toLocaleString("vi-VN")}</div>}
+            {["completed", "rejected"].includes(status) ? (
+              <div className="completed-actions">
+                {isSignedPreview && <button className="download-signed" type="button" onClick={downloadSignedPdf}><Download size={17} /> Tải file đã ký</button>}
+                <button className="submit-button new-request" type="button" onClick={createNewRequest}>
+                  <RefreshCw size={18} /> Tạo yêu cầu mới
+                </button>
+              </div>
+            ) : (
+              <button className="submit-button" disabled={submitting} type="submit">
+                {submitting ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}
+                {submitting ? "Đang gửi..." : "Gửi yêu cầu ký"}
+              </button>
+            )}
             <span>Bằng việc tiếp tục, bạn xác nhận thông tin trên là chính xác.</span>
           </div>
         </aside>
@@ -299,9 +483,14 @@ export default function Home() {
         <section className="document-area">
           <div className="document-toolbar">
             <div><span className="step-label">BƯỚC 3</span><h2>Đặt vị trí ký</h2></div>
-            {file && <div className="field-count"><span>{fields.length}</span> vùng ký</div>}
+            {file && !isSignedPreview && <div className="signature-actions">
+              <div className="page-picker"><span>Trang đang xem</span><select disabled={isFileLocked} value={targetPage} onChange={(e) => setTargetPage(Number(e.target.value))}>{Array.from({ length: pageCount }, (_, i) => <option key={i + 1} value={i + 1}>Trang {i + 1}</option>)}</select><ChevronDown size={14} /></div>
+              <button type="button" disabled={isFileLocked} onClick={addField}><Plus size={16} /> Thêm vùng ký</button>
+              <div className="field-count"><span>{fields.length}</span> vùng</div>
+            </div>}
+            {isSignedPreview && <div className="signed-preview-badge"><CheckCircle2 size={15} /> Bản PDF đã ký</div>}
           </div>
-          <div className="document-scroll">
+          <div className="document-scroll" ref={documentScrollRef} onScroll={detectVisiblePage}>
             {!pdf ? (
               <div className="empty-preview">
                 <div className="empty-file"><FileText size={35} /></div>
@@ -318,8 +507,10 @@ export default function Home() {
                     pageNumber={index + 1}
                     fields={fields.filter((field) => field.page === index + 1)}
                     selectedId={selectedId}
-                    onSelect={setSelectedId}
+                    locked={isFileLocked}
+                    onSelect={(id) => { setSelectedId(id); setTargetPage(index + 1); }}
                     onMove={(id, x, y) => updateField(id, { xRatio: x, yRatio: y })}
+                    onResize={(id, width, height) => updateField(id, { widthRatio: width, heightRatio: height })}
                   />
                 ))}
               </div>
