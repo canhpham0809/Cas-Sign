@@ -92,6 +92,22 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 - `npm test`: build the starter and verify its rendered loading skeleton
 - `npm run db:generate`: generate Drizzle migrations after schema changes
 
+## Automatic deployment
+
+Pushes to `main` run `.github/workflows/deploy.yml`. The workflow builds the
+full-stack application, deploys it as the `cas-sign` Cloudflare Worker, and
+updates the BankHub credentials as encrypted Worker secrets.
+
+Add these repository secrets in **GitHub → Settings → Secrets and variables →
+Actions** before running the workflow:
+
+- `CLOUDFLARE_API_TOKEN`: Cloudflare token with Workers Scripts edit access
+- `CLOUDFLARE_ACCOUNT_ID`: Cloudflare account ID
+- `ESIGN_CLIENT_ID`: BankHub client ID
+- `ESIGN_SECRET_KEY`: BankHub secret key
+
+The deployed URL is shown in the `Deploy Worker` step of the GitHub Actions run.
+
 ## Learn More
 
 - [vinext Documentation](https://github.com/cloudflare/vinext)
