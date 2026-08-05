@@ -27,7 +27,6 @@ type SignatureField = {
 };
 
 type FormState = {
-  signRequestId: string;
   identificationNumber: string;
   documentName: string;
   organizationName: string;
@@ -46,12 +45,14 @@ type SignStatusResponse = {
 };
 
 const initialForm: FormState = {
-  signRequestId: "",
   identificationNumber: "",
   documentName: "",
   organizationName: "",
   taxCode: "",
 };
+
+const createSignRequestId = (): string =>
+  `CAS-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
 
 const defaultField = (page = 1, index = 0): SignatureField => ({
   id: crypto.randomUUID(),
@@ -181,6 +182,9 @@ export default function Home() {
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollingIdRef = useRef<string | null>(null);
   const [form, setForm] = useState(initialForm);
+  const [activeRequestId, setActiveRequestId] = useState("");
+  const [isBusinessSigning, setIsBusinessSigning] = useState(false);
+  const [touched, setTouched] = useState<Partial<Record<keyof FormState, boolean>>>({});
   const [file, setFile] = useState<File | null>(null);
   const [pdf, setPdf] = useState<any>(null);
   const [pageCount, setPageCount] = useState(0);
@@ -196,6 +200,25 @@ export default function Home() {
 
   const selected = useMemo(() => fields.find((item) => item.id === selectedId), [fields, selectedId]);
   const isFileLocked = status === "sent" || status === "processing" || submitting;
+  const validationErrors = useMemo(() => {
+    const errors: Partial<Record<keyof FormState | "file" | "fields", string>> = {};
+    const identification = form.identificationNumber.trim();
+    if (!identification) errors.identificationNumber = "Vui lòng nhập số giấy tờ.";
+    else if (identification.length < 6) errors.identificationNumber = "Số giấy tờ cần ít nhất 6 ký tự.";
+    if (!form.organizationName.trim()) errors.organizationName = "Vui lòng nhập nơi gửi yêu cầu.";
+    if (!form.documentName.trim()) errors.documentName = "Vui lòng nhập tên tài liệu.";
+    if (isBusinessSigning) {
+      const taxCode = form.taxCode.trim();
+      if (!taxCode) errors.taxCode = "Vui lòng nhập mã số thuế.";
+      else if (!/^\d{10}(?:-\d{3})?$/.test(taxCode)) errors.taxCode = "Mã số thuế gồm 10 số hoặc 10 số-3 số.";
+    }
+    if (!file) errors.file = "Vui lòng tải lên file PDF.";
+    else if (file.size > 20 * 1024 * 1024) errors.file = "File PDF không được vượt quá 20 MB.";
+    if (fields.length === 0) errors.fields = "Cần đặt ít nhất một vùng ký.";
+    return errors;
+  }, [fields.length, file, form, isBusinessSigning]);
+  const canSubmit = Object.keys(validationErrors).length === 0 && !isFileLocked;
+  const validationHint = Object.values(validationErrors)[0];
 
   useEffect(() => () => {
     pollingIdRef.current = null;
@@ -267,8 +290,8 @@ export default function Home() {
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
     pollingIdRef.current = signRequestId;
     setSignedAt("");
-    setMessage("Hồ sơ đã gửi. Lần kiểm tra trạng thái đầu tiên sẽ bắt đầu sau 15 giây.");
-    pollTimerRef.current = setTimeout(() => void pollStatus(signRequestId), 15000);
+    setMessage("Hồ sơ đã gửi. Lần kiểm tra trạng thái đầu tiên sẽ bắt đầu sau 20 giây.");
+    pollTimerRef.current = setTimeout(() => void pollStatus(signRequestId), 20000);
   };
 
   const setValue = (key: keyof FormState, value: string) => {
@@ -276,10 +299,17 @@ export default function Home() {
     if (!["sent", "processing", "completed"].includes(status)) setStatus("draft");
   };
 
+  const touchField = (key: keyof FormState) => setTouched((prev) => ({ ...prev, [key]: true }));
+
   const loadFile = async (nextFile: File) => {
     if (nextFile.type !== "application/pdf") {
       setStatus("error");
       setMessage("Vui lòng chọn đúng định dạng PDF.");
+      return;
+    }
+    if (nextFile.size > 20 * 1024 * 1024) {
+      setStatus("error");
+      setMessage("File PDF không được vượt quá 20 MB.");
       return;
     }
     setLoadingPdf(true);
@@ -297,7 +327,8 @@ export default function Home() {
       setFields([first]);
       setSelectedId(first.id);
       setTargetPage(1);
-      if (!form.documentName) setForm((prev) => ({ ...prev, documentName: nextFile.name.replace(/\.pdf$/i, "") }));
+      setForm((prev) => ({ ...prev, documentName: nextFile.name.replace(/\.pdf$/i, "") }));
+      setTouched((prev) => ({ ...prev, documentName: false }));
     } catch {
       setStatus("error");
       setMessage("Không thể đọc file PDF này. Vui lòng thử một file khác.");
@@ -338,6 +369,7 @@ export default function Home() {
     setMessage("");
     setSignedAt("");
     setIsSignedPreview(false);
+    setActiveRequestId("");
     if (inputRef.current) inputRef.current.value = "";
   };
 
@@ -346,7 +378,7 @@ export default function Home() {
     const objectUrl = URL.createObjectURL(file);
     const anchor = document.createElement("a");
     anchor.href = objectUrl;
-    anchor.download = file.name || `${form.signRequestId}-signed.pdf`;
+    anchor.download = file.name || `${activeRequestId || "cas-sign"}-signed.pdf`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -374,19 +406,22 @@ export default function Home() {
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    const requiredValues = [form.signRequestId, form.identificationNumber, form.documentName, form.organizationName];
-    if (!file || fields.length === 0 || requiredValues.some((value) => !value.trim())) {
+    if (!canSubmit || !file) {
+      setTouched({ identificationNumber: true, documentName: true, organizationName: true, taxCode: isBusinessSigning });
       setStatus("error");
-      setMessage("Vui lòng nhập đủ thông tin, chọn PDF và đặt ít nhất một vùng ký.");
+      setMessage(validationHint || "Vui lòng kiểm tra lại thông tin trước khi gửi.");
       return;
     }
     setSubmitting(true);
     setMessage("");
     try {
+      const signRequestId = createSignRequestId();
+      setActiveRequestId(signRequestId);
       const body = new FormData();
+      body.append("signRequestId", signRequestId);
       Object.entries(form).forEach(([key, value]) => {
         const trimmed = value.trim();
-        if (trimmed) body.append(key, trimmed);
+        if (trimmed && (key !== "taxCode" || isBusinessSigning)) body.append(key, trimmed);
       });
       body.append("signatureFields", JSON.stringify(fields.map(({ id: _id, ...field }) => ({
         ...field,
@@ -401,7 +436,7 @@ export default function Home() {
         throw new Error(traceId ? `${baseMessage} · Trace: ${traceId}` : baseMessage);
       }
       setStatus("sent");
-      startPolling(form.signRequestId.trim());
+      startPolling(signRequestId);
     } catch (error) {
       setStatus("error");
       setMessage(error instanceof Error ? error.message : "Không thể gửi yêu cầu ký.");
@@ -432,11 +467,15 @@ export default function Home() {
           </div>
 
           <div className="fields-grid">
-            <label><span>Mã yêu cầu <em>*</em></span><input value={form.signRequestId} onChange={(e) => setValue("signRequestId", e.target.value)} placeholder="VD: C-TEST-019" /></label>
-            <label><span>Số giấy tờ <em>*</em></span><input value={form.identificationNumber} onChange={(e) => setValue("identificationNumber", e.target.value)} placeholder="CCCD / CMND" inputMode="numeric" /></label>
-            <label className="wide-field"><span>Tên tài liệu <em>*</em></span><input value={form.documentName} onChange={(e) => setValue("documentName", e.target.value)} placeholder="Biên bản đối soát" /></label>
-            <label className="wide-field"><span>Nơi gửi <em>*</em></span><input value={form.organizationName} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Công ty TNHH..." /></label>
-            <label className="wide-field"><span>Mã số thuế <small className="optional-label">Không bắt buộc</small></span><input value={form.taxCode} onChange={(e) => setValue("taxCode", e.target.value)} placeholder="Có thể để trống" inputMode="numeric" /></label>
+            <label className="wide-field"><span>Số giấy tờ <em>*</em></span><input className={touched.identificationNumber && validationErrors.identificationNumber ? "invalid" : ""} value={form.identificationNumber} onBlur={() => touchField("identificationNumber")} onChange={(e) => setValue("identificationNumber", e.target.value)} placeholder="CCCD / CMND" /></label>
+            {touched.identificationNumber && validationErrors.identificationNumber && <small className="field-error wide-field">{validationErrors.identificationNumber}</small>}
+            <label className="wide-field"><span>Tên tài liệu <em>*</em></span><input disabled={!file || isFileLocked || isSignedPreview} className={touched.documentName && validationErrors.documentName ? "invalid" : ""} value={form.documentName} onBlur={() => touchField("documentName")} onChange={(e) => setValue("documentName", e.target.value)} placeholder={file ? "Nhập tên tài liệu" : "Upload PDF để nhập tên tài liệu"} /></label>
+            {touched.documentName && validationErrors.documentName && <small className="field-error wide-field">{validationErrors.documentName}</small>}
+            <label className="wide-field"><span>Nơi gửi <em>*</em></span><input className={touched.organizationName && validationErrors.organizationName ? "invalid" : ""} value={form.organizationName} onBlur={() => touchField("organizationName")} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Công ty TNHH..." /></label>
+            {touched.organizationName && validationErrors.organizationName && <small className="field-error wide-field">{validationErrors.organizationName}</small>}
+            <label className="business-toggle wide-field"><input type="checkbox" checked={isBusinessSigning} onChange={(e) => { setIsBusinessSigning(e.target.checked); if (!e.target.checked) setTouched((prev) => ({ ...prev, taxCode: false })); }} /><span><strong>Ký doanh nghiệp</strong><small>Yêu cầu mã số thuế</small></span></label>
+            {isBusinessSigning && <label className="wide-field tax-field"><span>Mã số thuế <em>*</em></span><input className={touched.taxCode && validationErrors.taxCode ? "invalid" : ""} value={form.taxCode} onBlur={() => touchField("taxCode")} onChange={(e) => setValue("taxCode", e.target.value)} placeholder="0123456789 hoặc 0123456789-001" inputMode="numeric" /></label>}
+            {isBusinessSigning && touched.taxCode && validationErrors.taxCode && <small className="field-error wide-field">{validationErrors.taxCode}</small>}
           </div>
 
           <div className="section-divider" />
@@ -475,11 +514,12 @@ export default function Home() {
                 </button>
               </div>
             ) : (
-              <button className="submit-button" disabled={submitting} type="submit">
+              <button className="submit-button" disabled={!canSubmit || submitting} type="submit">
                 {submitting ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}
                 {submitting ? "Đang gửi..." : "Gửi yêu cầu ký"}
               </button>
             )}
+            {!canSubmit && !["sent", "processing", "completed", "rejected"].includes(status) && validationHint && <div className="validation-hint">{validationHint}</div>}
             <span>Bằng việc tiếp tục, bạn xác nhận thông tin trên là chính xác.</span>
           </div>
         </aside>
