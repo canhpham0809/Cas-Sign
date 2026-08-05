@@ -12,7 +12,6 @@ import {
   Plus,
   RefreshCw,
   Send,
-  Trash2,
   UploadCloud,
   X,
 } from "lucide-react";
@@ -55,6 +54,11 @@ const initialForm: FormState = {
 const createSignRequestId = (): string =>
   `CAS-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
 
+const normalizeDocumentName = (value: string): string => value
+  .replace(/[\u0000-\u001F\u007F]/g, " ")
+  .replace(/\s+/g, " ")
+  .trim();
+
 const defaultField = (page = 1, index = 0): SignatureField => ({
   id: crypto.randomUUID(),
   page,
@@ -65,7 +69,7 @@ const defaultField = (page = 1, index = 0): SignatureField => ({
   fieldType: "SIGNATURE",
 });
 
-function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove, onResize }: {
+function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove, onResize, onDelete }: {
   pdf: any;
   pageNumber: number;
   fields: SignatureField[];
@@ -74,6 +78,7 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove
   onSelect: (id: string) => void;
   onMove: (id: string, x: number, y: number) => void;
   onResize: (id: string, width: number, height: number) => void;
+  onDelete: (id: string) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -153,8 +158,7 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove
       <div className="pdf-page" ref={pageRef}>
         <canvas ref={canvasRef} />
         {fields.map((field, index) => (
-          <button
-            type="button"
+          <div
             key={field.id}
             className={`signature-box ${selectedId === field.id ? "selected" : ""} ${locked ? "locked" : ""}`}
             style={{
@@ -164,13 +168,17 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove
               height: `${field.heightRatio * 100}%`,
             }}
             onPointerDown={(e) => startDrag(e, field)}
-            disabled={locked}
+            onKeyDown={(e) => { if (!locked && (e.key === "Enter" || e.key === " ")) onSelect(field.id); }}
+            role="button"
+            tabIndex={locked ? -1 : 0}
+            aria-disabled={locked}
             aria-label={`Vùng ký ${index + 1} trên trang ${pageNumber}`}
           >
             <GripVertical size={16} />
             <span>Chữ ký {index + 1}</span>
+            {!locked && <button className="delete-signature" type="button" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); onDelete(field.id); }} aria-label={`Xoá vùng ký ${index + 1}`}><X size={13} /></button>}
             <span className="resize-handle" onPointerDown={(e) => startResize(e, field)} aria-hidden="true" />
-          </button>
+          </div>
         ))}
       </div>
     </div>
@@ -211,7 +219,9 @@ export default function Home() {
     if (!identification) errors.identificationNumber = "Vui lòng nhập số giấy tờ.";
     else if (identification.length < 6) errors.identificationNumber = "Số giấy tờ cần ít nhất 6 ký tự.";
     if (!form.organizationName.trim()) errors.organizationName = "Vui lòng nhập nơi gửi yêu cầu.";
-    if (!form.documentName.trim()) errors.documentName = "Vui lòng nhập tên tài liệu.";
+    const documentName = normalizeDocumentName(form.documentName);
+    if (!documentName) errors.documentName = "Vui lòng nhập tên tài liệu.";
+    else if (documentName.length > 200) errors.documentName = "Tên tài liệu không được vượt quá 200 ký tự.";
     if (isBusinessSigning) {
       const taxCode = form.taxCode.trim();
       if (!taxCode) errors.taxCode = "Vui lòng nhập mã số thuế.";
@@ -467,10 +477,10 @@ export default function Home() {
       setActiveRequestId(signRequestId);
       const body = new FormData();
       body.append("signRequestId", signRequestId);
-      Object.entries(form).forEach(([key, value]) => {
-        const trimmed = value.trim();
-        if (trimmed && (key !== "taxCode" || isBusinessSigning)) body.append(key, trimmed);
-      });
+      body.append("identificationNumber", form.identificationNumber.trim());
+      body.append("documentName", normalizeDocumentName(form.documentName));
+      body.append("organizationName", form.organizationName.trim());
+      if (isBusinessSigning) body.append("taxCode", form.taxCode.trim());
       body.append("signatureFields", JSON.stringify(fields.map(({ id: _id, ...field }) => ({
         ...field,
         yRatio: Math.max(0, Math.min(1, 1 - field.yRatio - field.heightRatio)),
@@ -517,7 +527,7 @@ export default function Home() {
           <div className="fields-grid">
             <label className="wide-field"><span>Số giấy tờ <em>*</em></span><input className={touched.identificationNumber && validationErrors.identificationNumber ? "invalid" : ""} value={form.identificationNumber} onBlur={() => touchField("identificationNumber")} onChange={(e) => setValue("identificationNumber", e.target.value)} placeholder="CCCD / CMND" /></label>
             {touched.identificationNumber && validationErrors.identificationNumber && <small className="field-error wide-field">{validationErrors.identificationNumber}</small>}
-            <label className="wide-field"><span>Tên tài liệu <em>*</em></span><input disabled={!file || isFileLocked || isSignedPreview} className={touched.documentName && validationErrors.documentName ? "invalid" : ""} value={form.documentName} onBlur={() => touchField("documentName")} onChange={(e) => setValue("documentName", e.target.value)} placeholder={file ? "Nhập tên tài liệu" : "Upload PDF để nhập tên tài liệu"} /></label>
+            <label className="wide-field"><span>Tên tài liệu <em>*</em></span><input maxLength={200} disabled={!file || isFileLocked || isSignedPreview} className={touched.documentName && validationErrors.documentName ? "invalid" : ""} value={form.documentName} onBlur={() => { touchField("documentName"); setValue("documentName", normalizeDocumentName(form.documentName)); }} onChange={(e) => setValue("documentName", e.target.value)} placeholder={file ? "Nhập tên tài liệu" : "Upload PDF để nhập tên tài liệu"} /></label>
             {touched.documentName && validationErrors.documentName && <small className="field-error wide-field">{validationErrors.documentName}</small>}
             <label className="wide-field"><span>Nơi gửi <em>*</em></span><input className={touched.organizationName && validationErrors.organizationName ? "invalid" : ""} value={form.organizationName} onBlur={() => touchField("organizationName")} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Công ty TNHH..." /></label>
             {touched.organizationName && validationErrors.organizationName && <small className="field-error wide-field">{validationErrors.organizationName}</small>}
@@ -546,7 +556,7 @@ export default function Home() {
 
           {selected && (
             <div className="field-editor">
-              <div><strong>Đang chọn: vùng {fields.findIndex((field) => field.id === selected.id) + 1}</strong><button type="button" disabled={isFileLocked} onClick={() => removeField(selected.id)}><Trash2 size={16} /> Xoá</button></div>
+              <div><strong>Đang chọn: vùng {fields.findIndex((field) => field.id === selected.id) + 1}</strong></div>
               <p>{isFileLocked ? "Vùng ký đã được khoá trong lúc chờ xử lý." : "Kéo cả khung để di chuyển · kéo chấm ở góc phải dưới để đổi kích thước."}</p>
             </div>
           )}
@@ -610,6 +620,7 @@ export default function Home() {
                     onSelect={(id) => { setSelectedId(id); setTargetPage(index + 1); }}
                     onMove={(id, x, y) => updateField(id, { xRatio: x, yRatio: y })}
                     onResize={(id, width, height) => updateField(id, { widthRatio: width, heightRatio: height })}
+                    onDelete={removeField}
                   />
                 ))}
               </div>

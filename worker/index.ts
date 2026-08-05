@@ -51,6 +51,7 @@ const worker = {
         const upstreamUrl = env.ESIGN_API_URL || "https://sandbox.bankhub.dev/esign/push-request-document";
         const uploadedFile = formData.get("file");
         const signatureFieldsValue = formData.get("signatureFields");
+        const documentNameValue = formData.get("documentName");
         let signatureFieldCount: number | null = null;
         if (typeof signatureFieldsValue === "string") {
           try {
@@ -65,6 +66,11 @@ const worker = {
           upstreamUrl,
           fieldNames: Array.from(formData.keys()).sort(),
           signatureFieldCount,
+          documentName: typeof documentNameValue === "string" ? {
+            length: documentNameValue.length,
+            hasLeadingOrTrailingWhitespace: documentNameValue !== documentNameValue.trim(),
+            containsControlCharacters: /[\u0000-\u001F\u007F]/.test(documentNameValue),
+          } : null,
           file: uploadedFile instanceof File ? {
             name: uploadedFile.name,
             type: uploadedFile.type,
