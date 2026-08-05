@@ -1,6 +1,7 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { DurableObject } from "cloudflare:workers";
 
 interface Env {
   ASSETS: Fetcher;
@@ -28,34 +29,40 @@ type StoredSignStatus = {
   lastUpdatedAt: string;
 };
 
-export class SignStatusStore {
-  constructor(private readonly state: DurableObjectState) {}
-
+// Kept for compatibility with the v1 Durable Object migration. Current status
+// reads use BankHub plus webhook cache, so a cached PENDING value cannot block polling.
+export class SignStatusStore extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     if (request.method === "GET") {
-      const status = await this.state.storage.get<StoredSignStatus>("status");
+      const status = await this.ctx.storage.get<StoredSignStatus>("status");
       return status
         ? Response.json(status)
         : Response.json({ message: "Chưa có trạng thái yêu cầu ký." }, { status: 404 });
     }
     if (request.method === "PUT") {
       const status = await request.json<StoredSignStatus>();
-      await this.state.storage.put("status", status);
+      await this.ctx.storage.put("status", status);
       return Response.json(status);
     }
     return new Response("Method not allowed", { status: 405 });
   }
 }
 
-const statusStub = (env: Env, signRequestId: string): DurableObjectStub =>
-  env.SIGN_STATUS.get(env.SIGN_STATUS.idFromName(signRequestId));
+const statusCacheKey = (signRequestId: string): Request =>
+  new Request(`https://sign-status.internal/status/${encodeURIComponent(signRequestId)}`);
 
-const saveSignStatus = (env: Env, status: StoredSignStatus): Promise<Response> =>
-  statusStub(env, status.signRequestId).fetch("https://sign-status.internal/", {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(status),
-  });
+const statusCache = (): Cache => (caches as CacheStorage & { default: Cache }).default;
+
+const loadSignStatus = async (signRequestId: string): Promise<StoredSignStatus | null> => {
+  const response = await statusCache().match(statusCacheKey(signRequestId));
+  return response ? response.json<StoredSignStatus>() : null;
+};
+
+const saveSignStatus = async (status: StoredSignStatus): Promise<void> => {
+  await statusCache().put(statusCacheKey(status.signRequestId), Response.json(status, {
+    headers: { "cache-control": "public, max-age=86400" },
+  }));
+};
 
 interface ExecutionContext {
   waitUntil(promise: Promise<unknown>): void;
@@ -131,14 +138,6 @@ const worker = {
         const logDetails = { traceId, upstreamUrl, status: upstream.status, contentType, responsePreview };
         if (upstream.ok) console.info("[esign.push] upstream response", logDetails);
         else console.error("[esign.push] upstream rejected request", logDetails);
-        const signRequestIdValue = formData.get("signRequestId");
-        if (upstream.ok && typeof signRequestIdValue === "string" && signRequestIdValue) {
-          ctx.waitUntil(saveSignStatus(env, {
-            signRequestId: signRequestIdValue,
-            state: "PENDING",
-            lastUpdatedAt: new Date().toISOString(),
-          }));
-        }
         return new Response(payload, {
           status: upstream.status,
           headers: { "content-type": contentType, "x-cas-trace-id": traceId },
@@ -186,7 +185,7 @@ const worker = {
         if (nextState === "COMPLETED" && !signRequest.signedFileUrl) {
           return Response.json({ message: "Webhook hoàn tất thiếu signedFileUrl.", traceId }, { status: 400 });
         }
-        await saveSignStatus(env, {
+        await saveSignStatus({
           signRequestId: signRequest.signRequestId,
           state: nextState,
           signedFileUrl: signRequest.signedFileUrl,
@@ -213,14 +212,12 @@ const worker = {
         return Response.json({ message: "Thiếu mã yêu cầu ký." }, { status: 400 });
       }
       try {
-        const storedResponse = await statusStub(env, signRequestId).fetch("https://sign-status.internal/");
-        if (storedResponse.ok) {
-          const storedStatus = await storedResponse.json<StoredSignStatus>();
+        const storedStatus = await loadSignStatus(signRequestId);
+        if (storedStatus && ["COMPLETED", "REJECTED"].includes(storedStatus.state)) {
           return Response.json({ requestId: "webhook-state", signRequestStatus: storedStatus });
         }
-        // Legacy requests created before webhook storage was enabled still use BankHub status.
         if (!env.ESIGN_CLIENT_ID || !env.ESIGN_SECRET_KEY) {
-          return Response.json({ message: "Không tìm thấy trạng thái nội bộ và máy chủ chưa có thông tin kết nối BankHub." }, { status: 404 });
+          return Response.json({ message: "Máy chủ chưa được cấu hình thông tin kết nối API ký số." }, { status: 500 });
         }
         const apiBase = (env.ESIGN_API_URL || "https://sandbox.bankhub.dev/esign/push-request-document")
           .replace(/\/push-request-document\/?$/, "");
@@ -234,6 +231,21 @@ const worker = {
         });
         const contentType = upstream.headers.get("content-type") || "application/json";
         const payload = await upstream.arrayBuffer();
+        if (upstream.ok) {
+          try {
+            const parsed = JSON.parse(new TextDecoder().decode(payload)) as { signRequestStatus?: StoredSignStatus };
+            const upstreamStatus = parsed.signRequestStatus;
+            if (upstreamStatus?.signRequestId && ["COMPLETED", "REJECTED"].includes(upstreamStatus.state?.toUpperCase())) {
+              ctx.waitUntil(saveSignStatus({
+                ...upstreamStatus,
+                state: upstreamStatus.state.toUpperCase(),
+                lastUpdatedAt: upstreamStatus.lastUpdatedAt || new Date().toISOString(),
+              }));
+            }
+          } catch {
+            // Return BankHub's response unchanged if it is not valid JSON.
+          }
+        }
         return new Response(payload, { status: upstream.status, headers: { "content-type": contentType } });
       } catch (error) {
         return Response.json({ message: error instanceof Error ? error.message : "Không thể lấy trạng thái ký." }, { status: 502 });

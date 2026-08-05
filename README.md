@@ -114,9 +114,9 @@ Actions** before running the workflow:
 https://cas-sign.canhpham0809.workers.dev/api/esign/webhook?token=<ESIGN_WEBHOOK_SECRET>
 ```
 
-Worker lưu trạng thái `COMPLETED` hoặc `REJECTED` từ webhook. Giao diện tiếp tục
-đọc `/api/esign/status/:signRequestId`; nếu là yêu cầu cũ chưa có trạng thái lưu
-trong Worker thì endpoint này tự fallback sang API trạng thái của BankHub.
+Worker lưu tạm trạng thái cuối `COMPLETED` hoặc `REJECTED` từ webhook. Giao diện
+tiếp tục đọc `/api/esign/status/:signRequestId`; nếu webhook chưa có trạng thái
+cuối thì endpoint này luôn gọi API trạng thái của BankHub.
 
 The deployed URL is shown in the `Deploy Worker` step of the GitHub Actions run.
 
