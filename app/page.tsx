@@ -435,7 +435,7 @@ export default function Home() {
             <label><span>Mã yêu cầu <em>*</em></span><input value={form.signRequestId} onChange={(e) => setValue("signRequestId", e.target.value)} placeholder="VD: C-TEST-019" /></label>
             <label><span>Số giấy tờ <em>*</em></span><input value={form.identificationNumber} onChange={(e) => setValue("identificationNumber", e.target.value)} placeholder="CCCD / CMND" inputMode="numeric" /></label>
             <label className="wide-field"><span>Tên tài liệu <em>*</em></span><input value={form.documentName} onChange={(e) => setValue("documentName", e.target.value)} placeholder="Biên bản đối soát" /></label>
-            <label className="wide-field"><span>Tên tổ chức <em>*</em></span><input value={form.organizationName} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Công ty TNHH..." /></label>
+            <label className="wide-field"><span>Nơi gửi <em>*</em></span><input value={form.organizationName} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Công ty TNHH..." /></label>
             <label className="wide-field"><span>Mã số thuế <small className="optional-label">Không bắt buộc</small></span><input value={form.taxCode} onChange={(e) => setValue("taxCode", e.target.value)} placeholder="Có thể để trống" inputMode="numeric" /></label>
           </div>
 
