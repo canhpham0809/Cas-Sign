@@ -13,14 +13,17 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 
 export default defineConfig(async ({ mode }) => {
   const localEnv = loadEnv(mode, process.cwd(), "");
-  const localBindingConfig = {
-    main: "./worker/index.ts",
-    compatibility_flags: ["nodejs_compat"],
-    vars: {
+  const localVars = Object.fromEntries(
+    Object.entries({
       ESIGN_CLIENT_ID: localEnv.ESIGN_CLIENT_ID,
       ESIGN_SECRET_KEY: localEnv.ESIGN_SECRET_KEY,
       ESIGN_API_URL: localEnv.ESIGN_API_URL,
-    },
+    }).filter(([, value]) => Boolean(value)),
+  );
+  const localBindingConfig = {
+    main: "./worker/index.ts",
+    compatibility_flags: ["nodejs_compat"],
+    vars: localVars,
     d1_databases: d1
       ? [
           {
