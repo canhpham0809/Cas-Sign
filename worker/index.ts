@@ -22,6 +22,11 @@ interface ExecutionContext {
   passThroughOnException(): void;
 }
 
+const sanitizeLogText = (value: string): string => value
+  .slice(0, 2000)
+  .replace(/\b\d{8,}\b/g, "[redacted-number]")
+  .replace(/([?&](?:X-Amz-Signature|X-Amz-Credential)=)[^&]+/gi, "$1[redacted]");
+
 // Image security config. SVG sources with .svg extension auto-skip the
 // optimization endpoint on the client side (served directly, no proxy).
 // To route SVGs through the optimizer (with security headers), set
@@ -33,12 +38,40 @@ const worker = {
     const url = new URL(request.url);
 
     if (url.pathname === "/api/esign" && request.method === "POST") {
+      const traceId = crypto.randomUUID();
       if (!env.ESIGN_CLIENT_ID || !env.ESIGN_SECRET_KEY) {
-        return Response.json({ message: "Máy chủ chưa được cấu hình thông tin kết nối API ký số." }, { status: 500 });
+        console.error("[esign.push] missing server credentials", { traceId });
+        return Response.json(
+          { message: "Máy chủ chưa được cấu hình thông tin kết nối API ký số.", traceId },
+          { status: 500, headers: { "x-cas-trace-id": traceId } },
+        );
       }
       try {
         const formData = await request.formData();
-        const upstream = await fetch(env.ESIGN_API_URL || "https://sandbox.bankhub.dev/esign/push-request-document", {
+        const upstreamUrl = env.ESIGN_API_URL || "https://sandbox.bankhub.dev/esign/push-request-document";
+        const uploadedFile = formData.get("file");
+        const signatureFieldsValue = formData.get("signatureFields");
+        let signatureFieldCount: number | null = null;
+        if (typeof signatureFieldsValue === "string") {
+          try {
+            const parsed = JSON.parse(signatureFieldsValue);
+            signatureFieldCount = Array.isArray(parsed) ? parsed.length : null;
+          } catch {
+            signatureFieldCount = null;
+          }
+        }
+        console.info("[esign.push] forwarding request", {
+          traceId,
+          upstreamUrl,
+          fieldNames: Array.from(formData.keys()).sort(),
+          signatureFieldCount,
+          file: uploadedFile instanceof File ? {
+            name: uploadedFile.name,
+            type: uploadedFile.type,
+            size: uploadedFile.size,
+          } : null,
+        });
+        const upstream = await fetch(upstreamUrl, {
           method: "POST",
           headers: {
             "x-client-id": env.ESIGN_CLIENT_ID,
@@ -48,9 +81,18 @@ const worker = {
         });
         const contentType = upstream.headers.get("content-type") || "application/json";
         const payload = await upstream.arrayBuffer();
-        return new Response(payload, { status: upstream.status, headers: { "content-type": contentType } });
+        const responsePreview = sanitizeLogText(new TextDecoder().decode(payload));
+        const logDetails = { traceId, upstreamUrl, status: upstream.status, contentType, responsePreview };
+        if (upstream.ok) console.info("[esign.push] upstream response", logDetails);
+        else console.error("[esign.push] upstream rejected request", logDetails);
+        return new Response(payload, {
+          status: upstream.status,
+          headers: { "content-type": contentType, "x-cas-trace-id": traceId },
+        });
       } catch (error) {
-        return Response.json({ message: error instanceof Error ? error.message : "Không thể kết nối dịch vụ ký số." }, { status: 502 });
+        const message = error instanceof Error ? error.message : "Không thể kết nối dịch vụ ký số.";
+        console.error("[esign.push] proxy failure", { traceId, message: sanitizeLogText(message) });
+        return Response.json({ message, traceId }, { status: 502, headers: { "x-cas-trace-id": traceId } });
       }
     }
 

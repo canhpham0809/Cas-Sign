@@ -395,7 +395,11 @@ export default function Home() {
       body.append("file", file);
       const response = await fetch("/api/esign", { method: "POST", body });
       const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result?.message || result?.error || "Dịch vụ ký số chưa phản hồi thành công.");
+      if (!response.ok) {
+        const traceId = response.headers.get("x-cas-trace-id") || result?.traceId;
+        const baseMessage = result?.message || result?.error || "Dịch vụ ký số chưa phản hồi thành công.";
+        throw new Error(traceId ? `${baseMessage} · Trace: ${traceId}` : baseMessage);
+      }
       setStatus("sent");
       startPolling(form.signRequestId.trim());
     } catch (error) {
