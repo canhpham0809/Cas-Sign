@@ -54,6 +54,8 @@ const initialForm: FormState = {
 const createSignRequestId = (): string =>
   `CAS-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
 
+const MAX_AUTO_STATUS_CHECKS = 20;
+
 const normalizeDocumentName = (value: string): string => value
   .replace(/[\u0000-\u001F\u007F]/g, " ")
   .replace(/\s+/g, " ")
@@ -191,6 +193,8 @@ export default function Home() {
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollingIdRef = useRef<string | null>(null);
+  const autoPollAttemptsRef = useRef(0);
+  const autoPollingStoppedRef = useRef(false);
   const [form, setForm] = useState(initialForm);
   const [activeRequestId, setActiveRequestId] = useState("");
   const [isBusinessSigning, setIsBusinessSigning] = useState(false);
@@ -210,6 +214,8 @@ export default function Home() {
   const [countdown, setCountdown] = useState(0);
   const [checkingStatus, setCheckingStatus] = useState(false);
   const [isReplacingSignedFile, setIsReplacingSignedFile] = useState(false);
+  const [pollAttempt, setPollAttempt] = useState(0);
+  const [autoPollingStopped, setAutoPollingStopped] = useState(false);
 
   const selected = useMemo(() => fields.find((item) => item.id === selectedId), [fields, selectedId]);
   const isFileLocked = status === "sent" || status === "processing" || status === "rejected" || submitting;
@@ -265,10 +271,14 @@ export default function Home() {
     setIsSignedPreview(true);
   };
 
-  const pollStatus = async (signRequestId: string) => {
+  const pollStatus = async (signRequestId: string, manual = false) => {
     if (pollingIdRef.current !== signRequestId) return;
     clearPollSchedule();
     setCheckingStatus(true);
+    if (!manual) {
+      autoPollAttemptsRef.current += 1;
+      setPollAttempt(autoPollAttemptsRef.current);
+    }
     try {
       const response = await fetch(`/api/esign/status/${encodeURIComponent(signRequestId)}`, { cache: "no-store" });
       const result = await response.json() as SignStatusResponse & { message?: string; error?: string };
@@ -316,7 +326,15 @@ export default function Home() {
       setCheckingStatus(false);
     }
     if (pollingIdRef.current === signRequestId) {
-      schedulePoll(signRequestId, 5);
+      if (!manual && autoPollAttemptsRef.current >= MAX_AUTO_STATUS_CHECKS) {
+        autoPollingStoppedRef.current = true;
+        setAutoPollingStopped(true);
+        setMessage(`Đã tự động kiểm tra ${MAX_AUTO_STATUS_CHECKS} lần nhưng chưa có kết quả cuối. Vui lòng dùng nút kiểm tra trạng thái.`);
+      } else if (autoPollingStoppedRef.current) {
+        setMessage("Chưa có kết quả mới. Tự động kiểm tra đã dừng; bạn có thể tiếp tục kiểm tra thủ công.");
+      } else {
+        schedulePoll(signRequestId, 5);
+      }
     }
   };
 
@@ -339,15 +357,19 @@ export default function Home() {
   const startPolling = (signRequestId: string) => {
     clearPollSchedule();
     pollingIdRef.current = signRequestId;
+    autoPollAttemptsRef.current = 0;
+    autoPollingStoppedRef.current = false;
+    setPollAttempt(0);
+    setAutoPollingStopped(false);
     setSignedAt("");
-    setMessage("Hồ sơ đã gửi. Lần kiểm tra trạng thái đầu tiên sẽ bắt đầu sau 20 giây.");
-    schedulePoll(signRequestId, 20);
+    setMessage("Hồ sơ đã gửi. Lần kiểm tra trạng thái đầu tiên sẽ bắt đầu sau 30 giây.");
+    schedulePoll(signRequestId, 30);
   };
 
   const checkStatusNow = () => {
     if (!activeRequestId || checkingStatus) return;
     clearPollSchedule();
-    void pollStatus(activeRequestId);
+    void pollStatus(activeRequestId, true);
   };
 
   const setValue = (key: keyof FormState, value: string) => {
@@ -428,6 +450,10 @@ export default function Home() {
     setActiveRequestId("");
     setCheckingStatus(false);
     setIsReplacingSignedFile(false);
+    autoPollAttemptsRef.current = 0;
+    autoPollingStoppedRef.current = false;
+    setPollAttempt(0);
+    setAutoPollingStopped(false);
     if (inputRef.current) inputRef.current.value = "";
   };
 
@@ -565,7 +591,7 @@ export default function Home() {
             {message && <div className={`notice ${status}`}><CheckCircle2 size={17} /> <span>{message}</span></div>}
             {["sent", "processing"].includes(status) && activeRequestId && !isReplacingSignedFile && (
               <div className="poll-controls">
-                <span><Clock3 size={14} /> {checkingStatus ? "Đang kiểm tra trạng thái..." : `Tự động kiểm tra sau ${countdown}s`}</span>
+                <span><Clock3 size={14} /> {checkingStatus ? "Đang kiểm tra trạng thái..." : autoPollingStopped ? `Đã dừng sau ${MAX_AUTO_STATUS_CHECKS} lần` : pollAttempt === 0 ? `Kiểm tra lần đầu sau ${countdown}s` : `Đã kiểm tra ${pollAttempt}/${MAX_AUTO_STATUS_CHECKS} · Lần tiếp theo sau ${countdown}s`}</span>
                 <button type="button" disabled={checkingStatus} onClick={checkStatusNow}><RefreshCw size={14} /> Kiểm tra trạng thái</button>
               </div>
             )}
