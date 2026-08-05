@@ -41,6 +41,7 @@ type SignStatusResponse = {
     signedAt?: string;
     signedFileUrl?: string;
     expiresIn?: number;
+    rejectedReason?: string;
   };
 };
 
@@ -314,7 +315,9 @@ export default function Home() {
       if (["REJECTED", "FAILED", "CANCELLED", "EXPIRED"].includes(nextState || "")) {
         pollingIdRef.current = null;
         setStatus(nextState === "REJECTED" ? "rejected" : "error");
-        setMessage(nextState === "REJECTED" ? "Người ký đã từ chối yêu cầu ký." : `Yêu cầu ký đã kết thúc với trạng thái ${nextState}.`);
+        setMessage(nextState === "REJECTED"
+          ? `Người ký đã từ chối yêu cầu ký.${signStatus?.rejectedReason ? ` Lý do: ${signStatus.rejectedReason}` : ""}`
+          : `Yêu cầu ký đã kết thúc với trạng thái ${nextState}.`);
         return;
       }
       setStatus("processing");

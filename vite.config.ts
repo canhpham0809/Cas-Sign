@@ -18,12 +18,17 @@ export default defineConfig(async ({ mode }) => {
       ESIGN_CLIENT_ID: localEnv.ESIGN_CLIENT_ID,
       ESIGN_SECRET_KEY: localEnv.ESIGN_SECRET_KEY,
       ESIGN_API_URL: localEnv.ESIGN_API_URL,
+      ESIGN_WEBHOOK_SECRET: localEnv.ESIGN_WEBHOOK_SECRET,
     }).filter(([, value]) => Boolean(value)),
   );
   const localBindingConfig = {
     main: "./worker/index.ts",
     compatibility_flags: ["nodejs_compat"],
     vars: localVars,
+    durable_objects: {
+      bindings: [{ name: "SIGN_STATUS", class_name: "SignStatusStore" }],
+    },
+    migrations: [{ tag: "v1", new_sqlite_classes: ["SignStatusStore"] }],
     d1_databases: d1
       ? [
           {

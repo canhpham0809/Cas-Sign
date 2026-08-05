@@ -5,9 +5,11 @@ import handler from "vinext/server/app-router-entry";
 interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
+  SIGN_STATUS: DurableObjectNamespace;
   ESIGN_CLIENT_ID?: string;
   ESIGN_SECRET_KEY?: string;
   ESIGN_API_URL?: string;
+  ESIGN_WEBHOOK_SECRET?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -16,6 +18,44 @@ interface Env {
     };
   };
 }
+
+type StoredSignStatus = {
+  signRequestId: string;
+  state: string;
+  signedFileUrl?: string;
+  expiresIn?: number;
+  rejectedReason?: string;
+  lastUpdatedAt: string;
+};
+
+export class SignStatusStore {
+  constructor(private readonly state: DurableObjectState) {}
+
+  async fetch(request: Request): Promise<Response> {
+    if (request.method === "GET") {
+      const status = await this.state.storage.get<StoredSignStatus>("status");
+      return status
+        ? Response.json(status)
+        : Response.json({ message: "Chưa có trạng thái yêu cầu ký." }, { status: 404 });
+    }
+    if (request.method === "PUT") {
+      const status = await request.json<StoredSignStatus>();
+      await this.state.storage.put("status", status);
+      return Response.json(status);
+    }
+    return new Response("Method not allowed", { status: 405 });
+  }
+}
+
+const statusStub = (env: Env, signRequestId: string): DurableObjectStub =>
+  env.SIGN_STATUS.get(env.SIGN_STATUS.idFromName(signRequestId));
+
+const saveSignStatus = (env: Env, status: StoredSignStatus): Promise<Response> =>
+  statusStub(env, status.signRequestId).fetch("https://sign-status.internal/", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(status),
+  });
 
 interface ExecutionContext {
   waitUntil(promise: Promise<unknown>): void;
@@ -91,6 +131,14 @@ const worker = {
         const logDetails = { traceId, upstreamUrl, status: upstream.status, contentType, responsePreview };
         if (upstream.ok) console.info("[esign.push] upstream response", logDetails);
         else console.error("[esign.push] upstream rejected request", logDetails);
+        const signRequestIdValue = formData.get("signRequestId");
+        if (upstream.ok && typeof signRequestIdValue === "string" && signRequestIdValue) {
+          ctx.waitUntil(saveSignStatus(env, {
+            signRequestId: signRequestIdValue,
+            state: "PENDING",
+            lastUpdatedAt: new Date().toISOString(),
+          }));
+        }
         return new Response(payload, {
           status: upstream.status,
           headers: { "content-type": contentType, "x-cas-trace-id": traceId },
@@ -102,15 +150,78 @@ const worker = {
       }
     }
 
-    if (url.pathname.startsWith("/api/esign/status/") && request.method === "GET") {
-      if (!env.ESIGN_CLIENT_ID || !env.ESIGN_SECRET_KEY) {
-        return Response.json({ message: "Máy chủ chưa được cấu hình thông tin kết nối API ký số." }, { status: 500 });
+    if (url.pathname === "/api/esign/webhook" && request.method === "POST") {
+      const traceId = crypto.randomUUID();
+      if (!env.ESIGN_WEBHOOK_SECRET) {
+        console.error("[esign.webhook] missing webhook secret", { traceId });
+        return Response.json({ message: "Webhook chưa được cấu hình.", traceId }, { status: 500 });
       }
+      if (url.searchParams.get("token") !== env.ESIGN_WEBHOOK_SECRET) {
+        console.warn("[esign.webhook] unauthorized", { traceId });
+        return Response.json({ message: "Webhook token không hợp lệ.", traceId }, { status: 401 });
+      }
+      try {
+        const payload = await request.json() as {
+          webhookType?: string;
+          webhookCode?: string;
+          signRequest?: {
+            signRequestId?: string;
+            state?: string;
+            signedFileUrl?: string;
+            expiresIn?: number;
+            rejectedReason?: string;
+          };
+        };
+        const signRequest = payload.signRequest;
+        const nextState = signRequest?.state?.toUpperCase();
+        if (
+          payload.webhookType !== "SIGN"
+          || payload.webhookCode !== "DEFAULT_UPDATE"
+          || !signRequest?.signRequestId
+          || !nextState
+          || !["COMPLETED", "REJECTED"].includes(nextState)
+        ) {
+          return Response.json({ message: "Payload webhook không hợp lệ.", traceId }, { status: 400 });
+        }
+        if (nextState === "COMPLETED" && !signRequest.signedFileUrl) {
+          return Response.json({ message: "Webhook hoàn tất thiếu signedFileUrl.", traceId }, { status: 400 });
+        }
+        await saveSignStatus(env, {
+          signRequestId: signRequest.signRequestId,
+          state: nextState,
+          signedFileUrl: signRequest.signedFileUrl,
+          expiresIn: signRequest.expiresIn,
+          rejectedReason: signRequest.rejectedReason,
+          lastUpdatedAt: new Date().toISOString(),
+        });
+        console.info("[esign.webhook] status stored", {
+          traceId,
+          signRequestId: signRequest.signRequestId,
+          state: nextState,
+        });
+        return Response.json({ ok: true, traceId });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Không thể xử lý webhook.";
+        console.error("[esign.webhook] invalid request", { traceId, message: sanitizeLogText(message) });
+        return Response.json({ message: "Payload webhook không hợp lệ.", traceId }, { status: 400 });
+      }
+    }
+
+    if (url.pathname.startsWith("/api/esign/status/") && request.method === "GET") {
       const signRequestId = decodeURIComponent(url.pathname.slice("/api/esign/status/".length));
       if (!signRequestId) {
         return Response.json({ message: "Thiếu mã yêu cầu ký." }, { status: 400 });
       }
       try {
+        const storedResponse = await statusStub(env, signRequestId).fetch("https://sign-status.internal/");
+        if (storedResponse.ok) {
+          const storedStatus = await storedResponse.json<StoredSignStatus>();
+          return Response.json({ requestId: "webhook-state", signRequestStatus: storedStatus });
+        }
+        // Legacy requests created before webhook storage was enabled still use BankHub status.
+        if (!env.ESIGN_CLIENT_ID || !env.ESIGN_SECRET_KEY) {
+          return Response.json({ message: "Không tìm thấy trạng thái nội bộ và máy chủ chưa có thông tin kết nối BankHub." }, { status: 404 });
+        }
         const apiBase = (env.ESIGN_API_URL || "https://sandbox.bankhub.dev/esign/push-request-document")
           .replace(/\/push-request-document\/?$/, "");
         const upstream = await fetch(`${apiBase}/requests/${encodeURIComponent(signRequestId)}/status`, {

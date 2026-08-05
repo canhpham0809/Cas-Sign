@@ -105,6 +105,18 @@ Actions** before running the workflow:
 - `CLOUDFLARE_ACCOUNT_ID`: Cloudflare account ID
 - `ESIGN_CLIENT_ID`: BankHub client ID
 - `ESIGN_SECRET_KEY`: BankHub secret key
+- `ESIGN_WEBHOOK_SECRET`: chuỗi bí mật dùng để xác thực webhook (có thể tạo bằng `openssl rand -hex 32`)
+
+Đăng ký chính xác URL đầy đủ sau với BankHub (thay phần token bằng cùng giá trị
+đã lưu trong `ESIGN_WEBHOOK_SECRET`):
+
+```text
+https://cas-sign.canhpham0809.workers.dev/api/esign/webhook?token=<ESIGN_WEBHOOK_SECRET>
+```
+
+Worker lưu trạng thái `COMPLETED` hoặc `REJECTED` từ webhook. Giao diện tiếp tục
+đọc `/api/esign/status/:signRequestId`; nếu là yêu cầu cũ chưa có trạng thái lưu
+trong Worker thì endpoint này tự fallback sang API trạng thái của BankHub.
 
 The deployed URL is shown in the `Deploy Worker` step of the GitHub Actions run.
 

@@ -23,6 +23,7 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       ESIGN_CLIENT_ID: ${{ secrets.ESIGN_CLIENT_ID }}
       ESIGN_SECRET_KEY: ${{ secrets.ESIGN_SECRET_KEY }}
+      ESIGN_WEBHOOK_SECRET: ${{ secrets.ESIGN_WEBHOOK_SECRET }}
 
     steps:
       - name: Checkout source
@@ -43,11 +44,12 @@ jobs:
           # Do not embed API credentials into the generated Wrangler config.
           ESIGN_CLIENT_ID: ""
           ESIGN_SECRET_KEY: ""
+          ESIGN_WEBHOOK_SECRET: ""
 
       - name: Deploy Worker
         run: npx wrangler deploy --config dist/server/wrangler.json --name cas-sign
 
       - name: Update encrypted eSign secrets
         run: |
-          jq -n '{ESIGN_CLIENT_ID: env.ESIGN_CLIENT_ID, ESIGN_SECRET_KEY: env.ESIGN_SECRET_KEY}' \
+          jq -n '{ESIGN_CLIENT_ID: env.ESIGN_CLIENT_ID, ESIGN_SECRET_KEY: env.ESIGN_SECRET_KEY, ESIGN_WEBHOOK_SECRET: env.ESIGN_WEBHOOK_SECRET}' \
             | npx wrangler secret bulk --config dist/server/wrangler.json --name cas-sign
