@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
   ChevronDown,
+  Clock3,
   Download,
   FileText,
   GripVertical,
@@ -180,6 +181,7 @@ export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const documentScrollRef = useRef<HTMLDivElement>(null);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollingIdRef = useRef<string | null>(null);
   const [form, setForm] = useState(initialForm);
   const [activeRequestId, setActiveRequestId] = useState("");
@@ -197,9 +199,12 @@ export default function Home() {
   const [message, setMessage] = useState("");
   const [signedAt, setSignedAt] = useState("");
   const [isSignedPreview, setIsSignedPreview] = useState(false);
+  const [countdown, setCountdown] = useState(0);
+  const [checkingStatus, setCheckingStatus] = useState(false);
+  const [isReplacingSignedFile, setIsReplacingSignedFile] = useState(false);
 
   const selected = useMemo(() => fields.find((item) => item.id === selectedId), [fields, selectedId]);
-  const isFileLocked = status === "sent" || status === "processing" || submitting;
+  const isFileLocked = status === "sent" || status === "processing" || status === "rejected" || submitting;
   const validationErrors = useMemo(() => {
     const errors: Partial<Record<keyof FormState | "file" | "fields", string>> = {};
     const identification = form.identificationNumber.trim();
@@ -223,7 +228,16 @@ export default function Home() {
   useEffect(() => () => {
     pollingIdRef.current = null;
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
   }, []);
+
+  const clearPollSchedule = () => {
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+    pollTimerRef.current = null;
+    countdownTimerRef.current = null;
+    setCountdown(0);
+  };
 
   const replaceWithSignedPdf = async (url: string, signRequestId: string) => {
     const response = await fetch(`/api/esign/signed-file?url=${encodeURIComponent(url)}`, { cache: "no-store" });
@@ -243,6 +257,8 @@ export default function Home() {
 
   const pollStatus = async (signRequestId: string) => {
     if (pollingIdRef.current !== signRequestId) return;
+    clearPollSchedule();
+    setCheckingStatus(true);
     try {
       const response = await fetch(`/api/esign/status/${encodeURIComponent(signRequestId)}`, { cache: "no-store" });
       const result = await response.json() as SignStatusResponse & { message?: string; error?: string };
@@ -251,7 +267,11 @@ export default function Home() {
       const nextState = signStatus?.state?.toUpperCase();
       if (nextState === "COMPLETED" && signStatus?.signedFileUrl) {
         pollingIdRef.current = null;
+        setIsReplacingSignedFile(true);
+        setStatus("processing");
+        setMessage("Đã ký hoàn tất. Đang cập nhật bản PDF đã ký...");
         try {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
           await replaceWithSignedPdf(signStatus.signedFileUrl, signRequestId);
           setStatus("completed");
           setSignedAt(signStatus.signedAt || "");
@@ -259,6 +279,8 @@ export default function Home() {
         } catch (error) {
           setStatus("completed");
           setMessage(error instanceof Error ? error.message : "Đã ký xong nhưng chưa thể hiển thị file đã ký.");
+        } finally {
+          setIsReplacingSignedFile(false);
         }
         return;
       }
@@ -280,23 +302,47 @@ export default function Home() {
     } catch (error) {
       setStatus("processing");
       setMessage(`${error instanceof Error ? error.message : "Chưa lấy được trạng thái."} Sẽ thử lại sau 5 giây.`);
+    } finally {
+      setCheckingStatus(false);
     }
     if (pollingIdRef.current === signRequestId) {
-      pollTimerRef.current = setTimeout(() => pollStatus(signRequestId), 5000);
+      schedulePoll(signRequestId, 5);
     }
   };
 
+  const schedulePoll = (signRequestId: string, seconds: number) => {
+    clearPollSchedule();
+    setCountdown(seconds);
+    countdownTimerRef.current = setInterval(() => {
+      setCountdown((current) => {
+        if (current <= 1) {
+          if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+          countdownTimerRef.current = null;
+          return 0;
+        }
+        return current - 1;
+      });
+    }, 1000);
+    pollTimerRef.current = setTimeout(() => void pollStatus(signRequestId), seconds * 1000);
+  };
+
   const startPolling = (signRequestId: string) => {
-    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    clearPollSchedule();
     pollingIdRef.current = signRequestId;
     setSignedAt("");
     setMessage("Hồ sơ đã gửi. Lần kiểm tra trạng thái đầu tiên sẽ bắt đầu sau 20 giây.");
-    pollTimerRef.current = setTimeout(() => void pollStatus(signRequestId), 20000);
+    schedulePoll(signRequestId, 20);
+  };
+
+  const checkStatusNow = () => {
+    if (!activeRequestId || checkingStatus) return;
+    clearPollSchedule();
+    void pollStatus(activeRequestId);
   };
 
   const setValue = (key: keyof FormState, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }));
-    if (!["sent", "processing", "completed"].includes(status)) setStatus("draft");
+    if (!["sent", "processing", "completed", "rejected"].includes(status)) setStatus("draft");
   };
 
   const touchField = (key: keyof FormState) => setTouched((prev) => ({ ...prev, [key]: true }));
@@ -358,7 +404,7 @@ export default function Home() {
 
   const createNewRequest = () => {
     pollingIdRef.current = null;
-    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    clearPollSchedule();
     setFile(null);
     setPdf(null);
     setPageCount(0);
@@ -370,6 +416,8 @@ export default function Home() {
     setSignedAt("");
     setIsSignedPreview(false);
     setActiveRequestId("");
+    setCheckingStatus(false);
+    setIsReplacingSignedFile(false);
     if (inputRef.current) inputRef.current.value = "";
   };
 
@@ -505,6 +553,12 @@ export default function Home() {
 
           <div className="submit-area">
             {message && <div className={`notice ${status}`}><CheckCircle2 size={17} /> <span>{message}</span></div>}
+            {["sent", "processing"].includes(status) && activeRequestId && !isReplacingSignedFile && (
+              <div className="poll-controls">
+                <span><Clock3 size={14} /> {checkingStatus ? "Đang kiểm tra trạng thái..." : `Tự động kiểm tra sau ${countdown}s`}</span>
+                <button type="button" disabled={checkingStatus} onClick={checkStatusNow}><RefreshCw size={14} /> Kiểm tra trạng thái</button>
+              </div>
+            )}
             {status === "completed" && signedAt && <div className="signed-time">Ký lúc {new Date(signedAt).toLocaleString("vi-VN")}</div>}
             {["completed", "rejected"].includes(status) ? (
               <div className="completed-actions">
@@ -534,6 +588,7 @@ export default function Home() {
             </div>}
             {isSignedPreview && <div className="signed-preview-badge"><CheckCircle2 size={15} /> Bản PDF đã ký</div>}
           </div>
+          {isReplacingSignedFile && <div className="replace-file-overlay"><LoaderCircle className="spin" size={30} /><strong>Đang cập nhật file đã ký</strong><span>Vui lòng chờ trong giây lát...</span></div>}
           <div className="document-scroll" ref={documentScrollRef} onScroll={detectVisiblePage}>
             {!pdf ? (
               <div className="empty-preview">

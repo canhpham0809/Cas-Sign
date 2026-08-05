@@ -90,8 +90,15 @@ input.invalid { border-color:#d56656; background:#fff9f7; box-shadow:0 0 0 3px #
 .notice.completed { background:var(--green-soft); color:var(--green); }
 .notice.processing { background:#fff8e8; color:#805c17; }
 .notice svg { flex:0 0 auto; }
+.poll-controls { margin-bottom:9px; padding:9px; border:1px solid #ead49f; border-radius:8px; background:#fffaf0; display:grid; gap:7px; }
+.poll-controls > span { display:flex; align-items:center; justify-content:center; gap:5px; color:#785716; font-size:9px; font-weight:700; }
+.poll-controls button { height:32px; border:1px solid #d8bd7e; border-radius:7px; background:#fff; color:#765513; display:flex; align-items:center; justify-content:center; gap:6px; font-size:9px; font-weight:800; }
+.poll-controls button:disabled { opacity:.55; cursor:wait; }
 .signed-time { margin:-2px 0 8px; text-align:center; color:#607068; font-size:9px; }
 .document-area { min-width:0; background:#f2f4f2; display:flex; flex-direction:column; height:calc(100vh - 62px); position:sticky; top:62px; }
+.replace-file-overlay { position:absolute; inset:64px 0 0; z-index:20; background:#f2f4f2e8; backdrop-filter:blur(2px); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; color:var(--green); }
+.replace-file-overlay strong { font-size:13px; }
+.replace-file-overlay span { color:#75817a; font-size:10px; }
 .document-toolbar { height:64px; flex:0 0 auto; align-items:center; padding:0 24px; border-bottom:1px solid var(--line); background:#f8faf8; }
 .document-toolbar .step-label { margin-bottom:4px; }
 .field-count { display:flex; gap:7px; align-items:center; color:#6e7973; font-size:11px; font-weight:700; }
