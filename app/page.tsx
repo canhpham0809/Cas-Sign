@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
   ChevronDown,
-  Clock3,
   Download,
   FileText,
   GripVertical,
@@ -12,6 +11,7 @@ import {
   Plus,
   RefreshCw,
   Send,
+  Trash2,
   UploadCloud,
   X,
 } from "lucide-react";
@@ -27,6 +27,7 @@ type SignatureField = {
 };
 
 type FormState = {
+  signRequestId: string;
   identificationNumber: string;
   documentName: string;
   organizationName: string;
@@ -41,26 +42,16 @@ type SignStatusResponse = {
     signedAt?: string;
     signedFileUrl?: string;
     expiresIn?: number;
-    rejectedReason?: string;
   };
 };
 
 const initialForm: FormState = {
+  signRequestId: "",
   identificationNumber: "",
   documentName: "",
   organizationName: "",
   taxCode: "",
 };
-
-const createSignRequestId = (): string =>
-  `CAS-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
-
-const MAX_AUTO_STATUS_CHECKS = 20;
-
-const normalizeDocumentName = (value: string): string => value
-  .replace(/[\u0000-\u001F\u007F]/g, " ")
-  .replace(/\s+/g, " ")
-  .trim();
 
 const defaultField = (page = 1, index = 0): SignatureField => ({
   id: crypto.randomUUID(),
@@ -72,7 +63,7 @@ const defaultField = (page = 1, index = 0): SignatureField => ({
   fieldType: "SIGNATURE",
 });
 
-function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove, onResize, onDelete }: {
+function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove, onResize }: {
   pdf: any;
   pageNumber: number;
   fields: SignatureField[];
@@ -81,7 +72,6 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove
   onSelect: (id: string) => void;
   onMove: (id: string, x: number, y: number) => void;
   onResize: (id: string, width: number, height: number) => void;
-  onDelete: (id: string) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -161,7 +151,8 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove
       <div className="pdf-page" ref={pageRef}>
         <canvas ref={canvasRef} />
         {fields.map((field, index) => (
-          <div
+          <button
+            type="button"
             key={field.id}
             className={`signature-box ${selectedId === field.id ? "selected" : ""} ${locked ? "locked" : ""}`}
             style={{
@@ -171,17 +162,13 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove
               height: `${field.heightRatio * 100}%`,
             }}
             onPointerDown={(e) => startDrag(e, field)}
-            onKeyDown={(e) => { if (!locked && (e.key === "Enter" || e.key === " ")) onSelect(field.id); }}
-            role="button"
-            tabIndex={locked ? -1 : 0}
-            aria-disabled={locked}
+            disabled={locked}
             aria-label={`Vùng ký ${index + 1} trên trang ${pageNumber}`}
           >
             <GripVertical size={16} />
             <span>Chữ ký {index + 1}</span>
-            {!locked && <button className="delete-signature" type="button" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); onDelete(field.id); }} aria-label={`Xoá vùng ký ${index + 1}`}><X size={13} /></button>}
             <span className="resize-handle" onPointerDown={(e) => startResize(e, field)} aria-hidden="true" />
-          </div>
+          </button>
         ))}
       </div>
     </div>
@@ -191,15 +178,8 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const documentScrollRef = useRef<HTMLDivElement>(null);
-  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pollingIdRef = useRef<string | null>(null);
-  const autoPollAttemptsRef = useRef(0);
-  const autoPollingStoppedRef = useRef(false);
+  const [checkingStatus, setCheckingStatus] = useState(false);
   const [form, setForm] = useState(initialForm);
-  const [activeRequestId, setActiveRequestId] = useState("");
-  const [isBusinessSigning, setIsBusinessSigning] = useState(false);
-  const [touched, setTouched] = useState<Partial<Record<keyof FormState, boolean>>>({});
   const [file, setFile] = useState<File | null>(null);
   const [pdf, setPdf] = useState<any>(null);
   const [pageCount, setPageCount] = useState(0);
@@ -212,49 +192,9 @@ export default function Home() {
   const [message, setMessage] = useState("");
   const [signedAt, setSignedAt] = useState("");
   const [isSignedPreview, setIsSignedPreview] = useState(false);
-  const [countdown, setCountdown] = useState(0);
-  const [checkingStatus, setCheckingStatus] = useState(false);
-  const [isReplacingSignedFile, setIsReplacingSignedFile] = useState(false);
-  const [pollAttempt, setPollAttempt] = useState(0);
-  const [autoPollingStopped, setAutoPollingStopped] = useState(false);
 
   const selected = useMemo(() => fields.find((item) => item.id === selectedId), [fields, selectedId]);
-  const isFileLocked = status === "sent" || status === "processing" || status === "rejected" || submitting;
-  const validationErrors = useMemo(() => {
-    const errors: Partial<Record<keyof FormState | "file" | "fields", string>> = {};
-    const identification = form.identificationNumber.trim();
-    if (!identification) errors.identificationNumber = "Vui lòng nhập số giấy tờ.";
-    else if (identification.length < 6) errors.identificationNumber = "Số giấy tờ cần ít nhất 6 ký tự.";
-    if (!form.organizationName.trim()) errors.organizationName = "Vui lòng nhập nơi gửi yêu cầu.";
-    const documentName = normalizeDocumentName(form.documentName);
-    if (!documentName) errors.documentName = "Vui lòng nhập tên tài liệu.";
-    else if (documentName.length > 200) errors.documentName = "Tên tài liệu không được vượt quá 200 ký tự.";
-    if (isBusinessSigning) {
-      const taxCode = form.taxCode.trim();
-      if (!taxCode) errors.taxCode = "Vui lòng nhập mã số thuế.";
-      else if (!/^\d{10}(?:-\d{3})?$/.test(taxCode)) errors.taxCode = "Mã số thuế gồm 10 số hoặc 10 số-3 số.";
-    }
-    if (!file) errors.file = "Vui lòng tải lên file PDF.";
-    else if (file.size > 20 * 1024 * 1024) errors.file = "File PDF không được vượt quá 20 MB.";
-    if (fields.length === 0) errors.fields = "Cần đặt ít nhất một vùng ký.";
-    return errors;
-  }, [fields.length, file, form, isBusinessSigning]);
-  const canSubmit = Object.keys(validationErrors).length === 0 && !isFileLocked;
-  const validationHint = Object.values(validationErrors)[0];
-
-  useEffect(() => () => {
-    pollingIdRef.current = null;
-    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
-    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
-  }, []);
-
-  const clearPollSchedule = () => {
-    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
-    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
-    pollTimerRef.current = null;
-    countdownTimerRef.current = null;
-    setCountdown(0);
-  };
+  const isFileLocked = status === "sent" || status === "processing" || submitting;
 
   const replaceWithSignedPdf = async (url: string, signRequestId: string) => {
     const response = await fetch(`/api/esign/signed-file?url=${encodeURIComponent(url)}`, { cache: "no-store" });
@@ -272,125 +212,57 @@ export default function Home() {
     setIsSignedPreview(true);
   };
 
-  const pollStatus = async (signRequestId: string, manual = false) => {
-    if (pollingIdRef.current !== signRequestId) return;
-    clearPollSchedule();
+  const checkStatus = async () => {
+    const signRequestId = form.signRequestId.trim();
+    if (!signRequestId) return;
     setCheckingStatus(true);
-    if (!manual) {
-      autoPollAttemptsRef.current += 1;
-      setPollAttempt(autoPollAttemptsRef.current);
-    }
     try {
       const response = await fetch(`/api/esign/status/${encodeURIComponent(signRequestId)}`, { cache: "no-store" });
-      const result = await response.json() as SignStatusResponse & { message?: string; error?: string };
+      const result = await response.json() as Record<string, any>;
       if (!response.ok) throw new Error(result.message || result.error || "Không thể lấy trạng thái ký.");
-      const signStatus = result.signRequestStatus;
+      const signStatus = result.signRequestStatus || (result.signRequestId || result.state ? result : result.data);
       const nextState = signStatus?.state?.toUpperCase();
       if (nextState === "COMPLETED" && signStatus?.signedFileUrl) {
-        pollingIdRef.current = null;
-        setIsReplacingSignedFile(true);
-        setStatus("processing");
-        setMessage("Đã ký hoàn tất. Đang cập nhật bản PDF đã ký...");
         try {
-          await new Promise((resolve) => setTimeout(resolve, 1000));
           await replaceWithSignedPdf(signStatus.signedFileUrl, signRequestId);
           setStatus("completed");
-          setSignedAt(signStatus.signedAt || "");
+          setSignedAt(signStatus.signedAt || signStatus.lastUpdatedAt || "");
           setMessage("Tài liệu đã ký hoàn tất. Bản xem trước đã được cập nhật.");
         } catch (error) {
           setStatus("completed");
           setMessage(error instanceof Error ? error.message : "Đã ký xong nhưng chưa thể hiển thị file đã ký.");
-        } finally {
-          setIsReplacingSignedFile(false);
         }
         return;
       }
       if (nextState === "COMPLETED") {
-        pollingIdRef.current = null;
         setStatus("completed");
-        setSignedAt(signStatus?.signedAt || "");
+        setSignedAt(signStatus?.signedAt || signStatus?.lastUpdatedAt || "");
         setMessage("Tài liệu đã ký hoàn tất nhưng API chưa trả về đường dẫn file đã ký.");
         return;
       }
       if (["REJECTED", "FAILED", "CANCELLED", "EXPIRED"].includes(nextState || "")) {
-        pollingIdRef.current = null;
         setStatus(nextState === "REJECTED" ? "rejected" : "error");
-        setMessage(nextState === "REJECTED"
-          ? `Người ký đã từ chối yêu cầu ký.${signStatus?.rejectedReason ? ` Lý do: ${signStatus.rejectedReason}` : ""}`
-          : `Yêu cầu ký đã kết thúc với trạng thái ${nextState}.`);
+        setMessage(nextState === "REJECTED" ? "Người ký đã từ chối yêu cầu ký." : `Yêu cầu ký đã kết thúc với trạng thái ${nextState}.`);
         return;
       }
       setStatus("processing");
-      setMessage(`Đang chờ ký${nextState ? ` · ${nextState}` : ""}. Tự động kiểm tra lại sau 5 giây.`);
+      setMessage(`Đang chờ ký${nextState ? ` · ${nextState}` : ""}. Kiểm tra lúc ${new Date().toLocaleTimeString("vi-VN")}.`);
     } catch (error) {
-      setStatus("processing");
-      setMessage(`${error instanceof Error ? error.message : "Chưa lấy được trạng thái."} Sẽ thử lại sau 5 giây.`);
+      setMessage(`${error instanceof Error ? error.message : "Chưa lấy được trạng thái."}`);
     } finally {
       setCheckingStatus(false);
     }
-    if (pollingIdRef.current === signRequestId) {
-      if (!manual && autoPollAttemptsRef.current >= MAX_AUTO_STATUS_CHECKS) {
-        autoPollingStoppedRef.current = true;
-        setAutoPollingStopped(true);
-        setMessage(`Đã tự động kiểm tra ${MAX_AUTO_STATUS_CHECKS} lần nhưng chưa có kết quả cuối. Vui lòng dùng nút kiểm tra trạng thái.`);
-      } else if (autoPollingStoppedRef.current) {
-        setMessage("Chưa có kết quả mới. Tự động kiểm tra đã dừng; bạn có thể tiếp tục kiểm tra thủ công.");
-      } else {
-        schedulePoll(signRequestId, 5);
-      }
-    }
-  };
-
-  const schedulePoll = (signRequestId: string, seconds: number) => {
-    clearPollSchedule();
-    setCountdown(seconds);
-    countdownTimerRef.current = setInterval(() => {
-      setCountdown((current) => {
-        if (current <= 1) {
-          if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
-          countdownTimerRef.current = null;
-          return 0;
-        }
-        return current - 1;
-      });
-    }, 1000);
-    pollTimerRef.current = setTimeout(() => void pollStatus(signRequestId), seconds * 1000);
-  };
-
-  const startPolling = (signRequestId: string) => {
-    clearPollSchedule();
-    pollingIdRef.current = signRequestId;
-    autoPollAttemptsRef.current = 0;
-    autoPollingStoppedRef.current = false;
-    setPollAttempt(0);
-    setAutoPollingStopped(false);
-    setSignedAt("");
-    setMessage("Hồ sơ đã gửi. Lần kiểm tra trạng thái đầu tiên sẽ bắt đầu sau 30 giây.");
-    schedulePoll(signRequestId, 30);
-  };
-
-  const checkStatusNow = () => {
-    if (!activeRequestId || checkingStatus) return;
-    clearPollSchedule();
-    void pollStatus(activeRequestId, true);
   };
 
   const setValue = (key: keyof FormState, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }));
-    if (!["sent", "processing", "completed", "rejected"].includes(status)) setStatus("draft");
+    if (!["sent", "processing", "completed"].includes(status)) setStatus("draft");
   };
-
-  const touchField = (key: keyof FormState) => setTouched((prev) => ({ ...prev, [key]: true }));
 
   const loadFile = async (nextFile: File) => {
     if (nextFile.type !== "application/pdf") {
       setStatus("error");
       setMessage("Vui lòng chọn đúng định dạng PDF.");
-      return;
-    }
-    if (nextFile.size > 20 * 1024 * 1024) {
-      setStatus("error");
-      setMessage("File PDF không được vượt quá 20 MB.");
       return;
     }
     setLoadingPdf(true);
@@ -408,8 +280,7 @@ export default function Home() {
       setFields([first]);
       setSelectedId(first.id);
       setTargetPage(1);
-      setForm((prev) => ({ ...prev, documentName: nextFile.name.replace(/\.pdf$/i, "") }));
-      setTouched((prev) => ({ ...prev, documentName: false }));
+      if (!form.documentName) setForm((prev) => ({ ...prev, documentName: nextFile.name.replace(/\.pdf$/i, "") }));
     } catch {
       setStatus("error");
       setMessage("Không thể đọc file PDF này. Vui lòng thử một file khác.");
@@ -438,8 +309,6 @@ export default function Home() {
   };
 
   const createNewRequest = () => {
-    pollingIdRef.current = null;
-    clearPollSchedule();
     setFile(null);
     setPdf(null);
     setPageCount(0);
@@ -450,13 +319,6 @@ export default function Home() {
     setMessage("");
     setSignedAt("");
     setIsSignedPreview(false);
-    setActiveRequestId("");
-    setCheckingStatus(false);
-    setIsReplacingSignedFile(false);
-    autoPollAttemptsRef.current = 0;
-    autoPollingStoppedRef.current = false;
-    setPollAttempt(0);
-    setAutoPollingStopped(false);
     if (inputRef.current) inputRef.current.value = "";
   };
 
@@ -465,7 +327,7 @@ export default function Home() {
     const objectUrl = URL.createObjectURL(file);
     const anchor = document.createElement("a");
     anchor.href = objectUrl;
-    anchor.download = file.name || `${activeRequestId || "cas-sign"}-signed.pdf`;
+    anchor.download = file.name || `${form.signRequestId}-signed.pdf`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -493,23 +355,20 @@ export default function Home() {
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!canSubmit || !file) {
-      setTouched({ identificationNumber: true, documentName: true, organizationName: true, taxCode: isBusinessSigning });
+    const requiredValues = [form.signRequestId, form.identificationNumber, form.documentName, form.organizationName];
+    if (!file || fields.length === 0 || requiredValues.some((value) => !value.trim())) {
       setStatus("error");
-      setMessage(validationHint || "Vui lòng kiểm tra lại thông tin trước khi gửi.");
+      setMessage("Vui lòng nhập đủ thông tin, chọn PDF và đặt ít nhất một vùng ký.");
       return;
     }
     setSubmitting(true);
     setMessage("");
     try {
-      const signRequestId = createSignRequestId();
-      setActiveRequestId(signRequestId);
       const body = new FormData();
-      body.append("signRequestId", signRequestId);
-      body.append("identificationNumber", form.identificationNumber.trim());
-      body.append("documentName", normalizeDocumentName(form.documentName));
-      body.append("organizationName", form.organizationName.trim());
-      if (isBusinessSigning) body.append("taxCode", form.taxCode.trim());
+      Object.entries(form).forEach(([key, value]) => {
+        const trimmed = value.trim();
+        if (trimmed) body.append(key, trimmed);
+      });
       body.append("signatureFields", JSON.stringify(fields.map(({ id: _id, ...field }) => ({
         ...field,
         yRatio: Math.max(0, Math.min(1, 1 - field.yRatio - field.heightRatio)),
@@ -523,7 +382,7 @@ export default function Home() {
         throw new Error(traceId ? `${baseMessage} · Trace: ${traceId}` : baseMessage);
       }
       setStatus("sent");
-      startPolling(signRequestId);
+      setMessage("Hồ sơ đã gửi thành công. Đang chờ BankHub gửi callback Webhook để hoàn tất.");
     } catch (error) {
       setStatus("error");
       setMessage(error instanceof Error ? error.message : "Không thể gửi yêu cầu ký.");
@@ -554,15 +413,11 @@ export default function Home() {
           </div>
 
           <div className="fields-grid">
-            <label className="wide-field"><span>Số giấy tờ <em>*</em></span><input className={touched.identificationNumber && validationErrors.identificationNumber ? "invalid" : ""} value={form.identificationNumber} onBlur={() => touchField("identificationNumber")} onChange={(e) => setValue("identificationNumber", e.target.value)} placeholder="CCCD / CMND" /></label>
-            {touched.identificationNumber && validationErrors.identificationNumber && <small className="field-error wide-field">{validationErrors.identificationNumber}</small>}
-            <label className="wide-field"><span>Tên tài liệu <em>*</em></span><input maxLength={200} disabled={!file || isFileLocked || isSignedPreview} className={touched.documentName && validationErrors.documentName ? "invalid" : ""} value={form.documentName} onBlur={() => { touchField("documentName"); setValue("documentName", normalizeDocumentName(form.documentName)); }} onChange={(e) => setValue("documentName", e.target.value)} placeholder={file ? "Nhập tên tài liệu" : "Upload PDF để nhập tên tài liệu"} /></label>
-            {touched.documentName && validationErrors.documentName && <small className="field-error wide-field">{validationErrors.documentName}</small>}
-            <label className="wide-field"><span>Nơi gửi <em>*</em></span><input className={touched.organizationName && validationErrors.organizationName ? "invalid" : ""} value={form.organizationName} onBlur={() => touchField("organizationName")} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Công ty TNHH..." /></label>
-            {touched.organizationName && validationErrors.organizationName && <small className="field-error wide-field">{validationErrors.organizationName}</small>}
-            <label className="business-toggle wide-field"><input type="checkbox" checked={isBusinessSigning} onChange={(e) => { setIsBusinessSigning(e.target.checked); if (!e.target.checked) setTouched((prev) => ({ ...prev, taxCode: false })); }} /><span><strong>Ký doanh nghiệp</strong><small>Yêu cầu mã số thuế</small></span></label>
-            {isBusinessSigning && <label className="wide-field tax-field"><span>Mã số thuế <em>*</em></span><input className={touched.taxCode && validationErrors.taxCode ? "invalid" : ""} value={form.taxCode} onBlur={() => touchField("taxCode")} onChange={(e) => setValue("taxCode", e.target.value)} placeholder="0123456789 hoặc 0123456789-001" inputMode="numeric" /></label>}
-            {isBusinessSigning && touched.taxCode && validationErrors.taxCode && <small className="field-error wide-field">{validationErrors.taxCode}</small>}
+            <label><span>Mã yêu cầu <em>*</em></span><input value={form.signRequestId} onChange={(e) => setValue("signRequestId", e.target.value)} placeholder="VD: C-TEST-019" /></label>
+            <label><span>Số giấy tờ <em>*</em></span><input value={form.identificationNumber} onChange={(e) => setValue("identificationNumber", e.target.value)} placeholder="CCCD / CMND" inputMode="numeric" /></label>
+            <label className="wide-field"><span>Tên tài liệu <em>*</em></span><input value={form.documentName} onChange={(e) => setValue("documentName", e.target.value)} placeholder="Biên bản đối soát" /></label>
+            <label className="wide-field"><span>Đơn vị gửi <em>*</em></span><input value={form.organizationName} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Công ty TNHH..." /></label>
+            <label className="wide-field"><span>Mã số thuế <small className="optional-label">Không bắt buộc</small></span><input value={form.taxCode} onChange={(e) => setValue("taxCode", e.target.value)} placeholder="Có thể để trống" inputMode="numeric" /></label>
           </div>
 
           <div className="section-divider" />
@@ -585,20 +440,22 @@ export default function Home() {
 
           {selected && (
             <div className="field-editor">
-              <div><strong>Đang chọn: vùng {fields.findIndex((field) => field.id === selected.id) + 1}</strong></div>
+              <div><strong>Đang chọn: vùng {fields.findIndex((field) => field.id === selected.id) + 1}</strong><button type="button" disabled={isFileLocked} onClick={() => removeField(selected.id)}><Trash2 size={16} /> Xoá</button></div>
               <p>{isFileLocked ? "Vùng ký đã được khoá trong lúc chờ xử lý." : "Kéo cả khung để di chuyển · kéo chấm ở góc phải dưới để đổi kích thước."}</p>
             </div>
           )}
 
           <div className="submit-area">
             {message && <div className={`notice ${status}`}><CheckCircle2 size={17} /> <span>{message}</span></div>}
-            {["sent", "processing"].includes(status) && activeRequestId && !isReplacingSignedFile && (
+            {status === "completed" && signedAt && <div className="signed-time">Ký lúc {new Date(signedAt).toLocaleString("vi-VN")}</div>}
+            {(status === "sent" || status === "processing") && (
               <div className="poll-controls">
-                <span><Clock3 size={14} /> {checkingStatus ? "Đang kiểm tra trạng thái..." : autoPollingStopped ? `Đã dừng sau ${MAX_AUTO_STATUS_CHECKS} lần` : pollAttempt === 0 ? `Kiểm tra lần đầu sau ${countdown}s` : `Đã kiểm tra ${pollAttempt}/${MAX_AUTO_STATUS_CHECKS} · Lần tiếp theo sau ${countdown}s`}</span>
-                <button type="button" disabled={checkingStatus} onClick={checkStatusNow}><RefreshCw size={14} /> Kiểm tra trạng thái</button>
+                <button type="button" disabled={checkingStatus} onClick={checkStatus}>
+                  {checkingStatus ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}
+                  {checkingStatus ? "Đang kiểm tra..." : "Cập nhật trạng thái thủ công"}
+                </button>
               </div>
             )}
-            {status === "completed" && signedAt && <div className="signed-time">Ký lúc {new Date(signedAt).toLocaleString("vi-VN")}</div>}
             {["completed", "rejected"].includes(status) ? (
               <div className="completed-actions">
                 {isSignedPreview && <button className="download-signed" type="button" onClick={downloadSignedPdf}><Download size={17} /> Tải file đã ký</button>}
@@ -607,12 +464,11 @@ export default function Home() {
                 </button>
               </div>
             ) : (
-              <button className="submit-button" disabled={!canSubmit || submitting} type="submit">
+              <button className="submit-button" disabled={submitting} type="submit">
                 {submitting ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}
                 {submitting ? "Đang gửi..." : "Gửi yêu cầu ký"}
               </button>
             )}
-            {!canSubmit && !["sent", "processing", "completed", "rejected"].includes(status) && validationHint && <div className="validation-hint">{validationHint}</div>}
             <span>Bằng việc tiếp tục, bạn xác nhận thông tin trên là chính xác.</span>
           </div>
         </aside>
@@ -627,7 +483,6 @@ export default function Home() {
             </div>}
             {isSignedPreview && <div className="signed-preview-badge"><CheckCircle2 size={15} /> Bản PDF đã ký</div>}
           </div>
-          {isReplacingSignedFile && <div className="replace-file-overlay"><LoaderCircle className="spin" size={30} /><strong>Đang cập nhật file đã ký</strong><span>Vui lòng chờ trong giây lát...</span></div>}
           <div className="document-scroll" ref={documentScrollRef} onScroll={detectVisiblePage}>
             {!pdf ? (
               <div className="empty-preview">
@@ -649,7 +504,6 @@ export default function Home() {
                     onSelect={(id) => { setSelectedId(id); setTargetPage(index + 1); }}
                     onMove={(id, x, y) => updateField(id, { xRatio: x, yRatio: y })}
                     onResize={(id, width, height) => updateField(id, { widthRatio: width, heightRatio: height })}
-                    onDelete={removeField}
                   />
                 ))}
               </div>

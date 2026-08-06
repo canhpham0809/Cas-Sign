@@ -53,12 +53,37 @@ const statusCacheKey = (signRequestId: string): Request =>
 
 const statusCache = (): Cache => (caches as CacheStorage & { default: Cache }).default;
 
-const loadSignStatus = async (signRequestId: string): Promise<StoredSignStatus | null> => {
+const loadSignStatus = async (env: Env, signRequestId: string): Promise<StoredSignStatus | null> => {
+  if (env.SIGN_STATUS) {
+    try {
+      const id = env.SIGN_STATUS.idFromName(signRequestId);
+      const stub = env.SIGN_STATUS.get(id);
+      const response = await stub.fetch("https://sign-status.internal/status");
+      if (response.ok) {
+        return await response.json<StoredSignStatus>();
+      }
+    } catch (error) {
+      console.warn("[esign.status] DO read fallback", error);
+    }
+  }
   const response = await statusCache().match(statusCacheKey(signRequestId));
   return response ? response.json<StoredSignStatus>() : null;
 };
 
-const saveSignStatus = async (status: StoredSignStatus): Promise<void> => {
+const saveSignStatus = async (env: Env, status: StoredSignStatus): Promise<void> => {
+  if (env.SIGN_STATUS) {
+    try {
+      const id = env.SIGN_STATUS.idFromName(status.signRequestId);
+      const stub = env.SIGN_STATUS.get(id);
+      await stub.fetch("https://sign-status.internal/status", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(status),
+      });
+    } catch (error) {
+      console.warn("[esign.status] DO write fallback", error);
+    }
+  }
   await statusCache().put(statusCacheKey(status.signRequestId), Response.json(status, {
     headers: { "cache-control": "public, max-age=86400" },
   }));
@@ -149,7 +174,7 @@ const worker = {
       }
     }
 
-    if (url.pathname === "/api/esign/webhook" && request.method === "POST") {
+    if (url.pathname === "/api/esign/webhook") {
       const traceId = crypto.randomUUID();
       if (!env.ESIGN_WEBHOOK_SECRET) {
         console.error("[esign.webhook] missing webhook secret", { traceId });
@@ -159,51 +184,64 @@ const worker = {
         console.warn("[esign.webhook] unauthorized", { traceId });
         return Response.json({ message: "Webhook token không hợp lệ.", traceId }, { status: 401 });
       }
-      try {
-        const payload = await request.json() as {
-          webhookType?: string;
-          webhookCode?: string;
-          signRequest?: {
-            signRequestId?: string;
-            state?: string;
-            signedFileUrl?: string;
-            expiresIn?: number;
-            rejectedReason?: string;
+
+      if (request.method === "GET") {
+        return Response.json({
+          status: "active",
+          message: "Webhook URL hợp lệ và đang hoạt động. BankHub sẽ gửi callback bằng phương thức POST.",
+          traceId,
+        });
+      }
+
+      if (request.method === "POST") {
+        try {
+          const payload = await request.json() as {
+            webhookType?: string;
+            webhookCode?: string;
+            signRequest?: {
+              signRequestId?: string;
+              state?: string;
+              signedFileUrl?: string;
+              expiresIn?: number;
+              rejectedReason?: string;
+            };
           };
-        };
-        const signRequest = payload.signRequest;
-        const nextState = signRequest?.state?.toUpperCase();
-        if (
-          payload.webhookType !== "SIGN"
-          || payload.webhookCode !== "DEFAULT_UPDATE"
-          || !signRequest?.signRequestId
-          || !nextState
-          || !["COMPLETED", "REJECTED"].includes(nextState)
-        ) {
+          const signRequest = payload.signRequest;
+          const nextState = signRequest?.state?.toUpperCase();
+          if (
+            payload.webhookType !== "SIGN"
+            || payload.webhookCode !== "DEFAULT_UPDATE"
+            || !signRequest?.signRequestId
+            || !nextState
+            || !["COMPLETED", "REJECTED"].includes(nextState)
+          ) {
+            return Response.json({ message: "Payload webhook không hợp lệ.", traceId }, { status: 400 });
+          }
+          if (nextState === "COMPLETED" && !signRequest.signedFileUrl) {
+            return Response.json({ message: "Webhook hoàn tất thiếu signedFileUrl.", traceId }, { status: 400 });
+          }
+          await saveSignStatus(env, {
+            signRequestId: signRequest.signRequestId,
+            state: nextState,
+            signedFileUrl: signRequest.signedFileUrl,
+            expiresIn: signRequest.expiresIn,
+            rejectedReason: signRequest.rejectedReason,
+            lastUpdatedAt: new Date().toISOString(),
+          });
+          console.info("[esign.webhook] status stored", {
+            traceId,
+            signRequestId: signRequest.signRequestId,
+            state: nextState,
+          });
+          return Response.json({ ok: true, traceId });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Không thể xử lý webhook.";
+          console.error("[esign.webhook] invalid request", { traceId, message: sanitizeLogText(message) });
           return Response.json({ message: "Payload webhook không hợp lệ.", traceId }, { status: 400 });
         }
-        if (nextState === "COMPLETED" && !signRequest.signedFileUrl) {
-          return Response.json({ message: "Webhook hoàn tất thiếu signedFileUrl.", traceId }, { status: 400 });
-        }
-        await saveSignStatus({
-          signRequestId: signRequest.signRequestId,
-          state: nextState,
-          signedFileUrl: signRequest.signedFileUrl,
-          expiresIn: signRequest.expiresIn,
-          rejectedReason: signRequest.rejectedReason,
-          lastUpdatedAt: new Date().toISOString(),
-        });
-        console.info("[esign.webhook] status stored", {
-          traceId,
-          signRequestId: signRequest.signRequestId,
-          state: nextState,
-        });
-        return Response.json({ ok: true, traceId });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Không thể xử lý webhook.";
-        console.error("[esign.webhook] invalid request", { traceId, message: sanitizeLogText(message) });
-        return Response.json({ message: "Payload webhook không hợp lệ.", traceId }, { status: 400 });
       }
+
+      return Response.json({ message: "Phương thức không được hỗ trợ.", traceId }, { status: 405 });
     }
 
     if (url.pathname.startsWith("/api/esign/status/") && request.method === "GET") {
@@ -212,7 +250,7 @@ const worker = {
         return Response.json({ message: "Thiếu mã yêu cầu ký." }, { status: 400 });
       }
       try {
-        const storedStatus = await loadSignStatus(signRequestId);
+        const storedStatus = await loadSignStatus(env, signRequestId);
         if (storedStatus && ["COMPLETED", "REJECTED"].includes(storedStatus.state)) {
           return Response.json({ requestId: "webhook-state", signRequestStatus: storedStatus });
         }
@@ -233,15 +271,23 @@ const worker = {
         const payload = await upstream.arrayBuffer();
         if (upstream.ok) {
           try {
-            const parsed = JSON.parse(new TextDecoder().decode(payload)) as { signRequestStatus?: StoredSignStatus };
-            const upstreamStatus = parsed.signRequestStatus;
-            if (upstreamStatus?.signRequestId && ["COMPLETED", "REJECTED"].includes(upstreamStatus.state?.toUpperCase())) {
-              ctx.waitUntil(saveSignStatus({
-                ...upstreamStatus,
-                state: upstreamStatus.state.toUpperCase(),
+            const rawText = new TextDecoder().decode(payload);
+            const parsed = JSON.parse(rawText) as Record<string, any>;
+            const upstreamStatus = parsed.signRequestStatus || (parsed.signRequestId || parsed.state ? parsed : parsed.data);
+            if (upstreamStatus?.state && ["COMPLETED", "REJECTED"].includes(String(upstreamStatus.state).toUpperCase())) {
+              const state = String(upstreamStatus.state).toUpperCase();
+              const normalizedStatus: StoredSignStatus = {
+                signRequestId: upstreamStatus.signRequestId || signRequestId,
+                state,
+                signedFileUrl: upstreamStatus.signedFileUrl,
+                expiresIn: upstreamStatus.expiresIn,
+                rejectedReason: upstreamStatus.rejectedReason,
                 lastUpdatedAt: upstreamStatus.lastUpdatedAt || new Date().toISOString(),
-              }));
+              };
+              ctx.waitUntil(saveSignStatus(env, normalizedStatus));
+              return Response.json({ requestId: "upstream-api", signRequestStatus: normalizedStatus, ...parsed });
             }
+            return Response.json({ signRequestStatus: upstreamStatus, ...parsed });
           } catch {
             // Return BankHub's response unchanged if it is not valid JSON.
           }
