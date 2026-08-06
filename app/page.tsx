@@ -191,6 +191,7 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove
 export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const documentScrollRef = useRef<HTMLDivElement>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollingIdRef = useRef<string | null>(null);
@@ -246,6 +247,10 @@ export default function Home() {
     pollingIdRef.current = null;
     if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
     if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
   }, []);
 
   const clearPollSchedule = () => {
@@ -254,6 +259,60 @@ export default function Home() {
     pollTimerRef.current = null;
     countdownTimerRef.current = null;
     setCountdown(0);
+  };
+
+  const listenForWebhookSSE = (signRequestId: string) => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    try {
+      const es = new EventSource(`/api/esign/stream/${encodeURIComponent(signRequestId)}`);
+      eventSourceRef.current = es;
+
+      es.onmessage = async (event) => {
+        if (!event.data || event.data.trim() === ": ok" || event.data.trim() === "ok") return;
+        try {
+          const signStatus = JSON.parse(event.data) as Record<string, any>;
+          const nextState = signStatus?.state?.toUpperCase();
+
+          if (nextState === "COMPLETED" && signStatus?.signedFileUrl) {
+            es.close();
+            eventSourceRef.current = null;
+            setIsReplacingSignedFile(true);
+            setStatus("processing");
+            setMessage("Đã nhận callback Webhook thành công! Đang tải bản PDF đã ký...");
+            try {
+              await replaceWithSignedPdf(signStatus.signedFileUrl, signRequestId);
+              setStatus("completed");
+              setSignedAt(signStatus.signedAt || signStatus.lastUpdatedAt || new Date().toISOString());
+              setMessage("Tài liệu đã ký hoàn tất. Bản xem trước đã được cập nhật.");
+            } catch (error) {
+              setStatus("completed");
+              setMessage(error instanceof Error ? error.message : "Đã ký xong nhưng chưa thể hiển thị file đã ký.");
+            } finally {
+              setIsReplacingSignedFile(false);
+            }
+          } else if (["REJECTED", "FAILED", "CANCELLED", "EXPIRED"].includes(nextState || "")) {
+            es.close();
+            eventSourceRef.current = null;
+            setStatus(nextState === "REJECTED" ? "rejected" : "error");
+            setMessage(nextState === "REJECTED"
+              ? `Người ký đã từ chối yêu cầu ký.${signStatus?.rejectedReason ? ` Lý do: ${signStatus.rejectedReason}` : ""}`
+              : `Yêu cầu ký đã kết thúc với trạng thái ${nextState}.`);
+          }
+        } catch (e) {
+          console.error("SSE message parse error", e);
+        }
+      };
+
+      es.onerror = () => {
+        es.close();
+        if (eventSourceRef.current === es) eventSourceRef.current = null;
+      };
+    } catch {
+      // SSE connection error fallback
+    }
   };
 
   const replaceWithSignedPdf = async (url: string, signRequestId: string) => {
@@ -470,6 +529,7 @@ export default function Home() {
       }
       setStatus("sent");
       setMessage("Hồ sơ đã gửi thành công. Vui lòng thực hiện ký trên Cas ID.");
+      listenForWebhookSSE(signRequestId);
     } catch (error) {
       setStatus("error");
       setMessage(error instanceof Error ? error.message : "Không thể gửi yêu cầu ký.");

@@ -32,18 +32,60 @@ type StoredSignStatus = {
 // Kept for compatibility with the v1 Durable Object migration. Current status
 // reads use BankHub plus webhook cache, so a cached PENDING value cannot block polling.
 export class SignStatusStore extends DurableObject<Env> {
+  private listeners: Set<WritableStreamDefaultWriter<Uint8Array>> = new Set();
+
   async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/stream" || request.headers.get("accept")?.includes("text/event-stream")) {
+      const stored = await this.ctx.storage.get<StoredSignStatus>("status");
+      const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+      const writer = writable.getWriter();
+      const encoder = new TextEncoder();
+
+      if (stored && ["COMPLETED", "REJECTED"].includes(stored.state)) {
+        writer.write(encoder.encode(`data: ${JSON.stringify(stored)}\n\n`));
+        writer.close();
+      } else {
+        this.listeners.add(writer);
+        writer.write(encoder.encode(`: ok\n\n`));
+      }
+
+      return new Response(readable, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+        },
+      });
+    }
+
     if (request.method === "GET") {
       const status = await this.ctx.storage.get<StoredSignStatus>("status");
       return status
         ? Response.json(status)
         : Response.json({ message: "Chưa có trạng thái yêu cầu ký." }, { status: 404 });
     }
+
     if (request.method === "PUT") {
       const status = await request.json<StoredSignStatus>();
       await this.ctx.storage.put("status", status);
+
+      const encoder = new TextEncoder();
+      const payload = encoder.encode(`data: ${JSON.stringify(status)}\n\n`);
+      for (const writer of this.listeners) {
+        try {
+          await writer.write(payload);
+          await writer.close();
+        } catch {
+          // Stream already closed
+        }
+      }
+      this.listeners.clear();
+
       return Response.json(status);
     }
+
     return new Response("Method not allowed", { status: 405 });
   }
 }
@@ -296,6 +338,21 @@ const worker = {
       } catch (error) {
         return Response.json({ message: error instanceof Error ? error.message : "Không thể lấy trạng thái ký." }, { status: 502 });
       }
+    }
+
+    if (url.pathname.startsWith("/api/esign/stream/") && request.method === "GET") {
+      const signRequestId = decodeURIComponent(url.pathname.slice("/api/esign/stream/".length));
+      if (!signRequestId) {
+        return Response.json({ message: "Thiếu mã yêu cầu ký." }, { status: 400 });
+      }
+      if (env.SIGN_STATUS) {
+        const id = env.SIGN_STATUS.idFromName(signRequestId);
+        const stub = env.SIGN_STATUS.get(id);
+        return stub.fetch("https://sign-status.internal/stream", {
+          headers: { "accept": "text/event-stream" },
+        });
+      }
+      return Response.json({ message: "Durable Object chưa được cấu hình." }, { status: 501 });
     }
 
     if (url.pathname === "/api/esign/signed-file" && request.method === "GET") {
