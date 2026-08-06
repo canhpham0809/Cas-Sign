@@ -65,9 +65,9 @@ const normalizeDocumentName = (value: string): string => value
 const defaultField = (page = 1, index = 0): SignatureField => ({
   id: crypto.randomUUID(),
   page,
-  xRatio: 0.56,
+  xRatio: 0.52,
   yRatio: Math.min(0.82, 0.7 + (index % 3) * 0.1),
-  widthRatio: 0.3,
+  widthRatio: 0.38,
   heightRatio: 0.1,
   fieldType: "SIGNATURE",
 });
@@ -224,9 +224,9 @@ export default function Home() {
   const validationErrors = useMemo(() => {
     const errors: Partial<Record<keyof FormState | "file" | "fields", string>> = {};
     const identification = form.identificationNumber.trim();
-    if (!identification) errors.identificationNumber = "Vui lòng nhập số giấy tờ.";
-    else if (identification.length < 6) errors.identificationNumber = "Số giấy tờ cần ít nhất 6 ký tự.";
-    if (!form.organizationName.trim()) errors.organizationName = "Vui lòng nhập nơi gửi yêu cầu.";
+    if (!identification) errors.identificationNumber = "Vui lòng nhập CCCD.";
+    else if (identification.length < 6) errors.identificationNumber = "CCCD cần ít nhất 6 ký tự.";
+    if (!form.organizationName.trim()) errors.organizationName = "Vui lòng nhập Gửi từ yêu cầu.";
     const documentName = normalizeDocumentName(form.documentName);
     if (!documentName) errors.documentName = "Vui lòng nhập tên tài liệu.";
     else if (documentName.length > 200) errors.documentName = "Tên tài liệu không được vượt quá 200 ký tự.";
@@ -560,11 +560,11 @@ export default function Home() {
           </div>
 
           <div className="fields-grid">
-            <label className="wide-field"><span>Số giấy tờ <em>*</em></span><input className={touched.identificationNumber && validationErrors.identificationNumber ? "invalid" : ""} value={form.identificationNumber} onBlur={() => touchField("identificationNumber")} onChange={(e) => setValue("identificationNumber", e.target.value)} placeholder="CCCD / CMND" /></label>
+            <label className="wide-field"><span>CCCD <em>*</em></span><input className={touched.identificationNumber && validationErrors.identificationNumber ? "invalid" : ""} value={form.identificationNumber} onBlur={() => touchField("identificationNumber")} onChange={(e) => setValue("identificationNumber", e.target.value)} placeholder="CCCD / CMND" /></label>
             {touched.identificationNumber && validationErrors.identificationNumber && <small className="field-error wide-field">{validationErrors.identificationNumber}</small>}
             <label className="wide-field"><span>Tên tài liệu <em>*</em></span><input maxLength={200} disabled={!file || isFileLocked || isSignedPreview} className={touched.documentName && validationErrors.documentName ? "invalid" : ""} value={form.documentName} onBlur={() => { touchField("documentName"); setValue("documentName", normalizeDocumentName(form.documentName)); }} onChange={(e) => setValue("documentName", e.target.value)} placeholder={file ? "Nhập tên tài liệu" : "Upload PDF để nhập tên tài liệu"} /></label>
             {touched.documentName && validationErrors.documentName && <small className="field-error wide-field">{validationErrors.documentName}</small>}
-            <label className="wide-field"><span>Nơi gửi <em>*</em></span><input className={touched.organizationName && validationErrors.organizationName ? "invalid" : ""} value={form.organizationName} onBlur={() => touchField("organizationName")} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Công ty TNHH..." /></label>
+            <label className="wide-field"><span>Gửi từ <em>*</em></span><input className={touched.organizationName && validationErrors.organizationName ? "invalid" : ""} value={form.organizationName} onBlur={() => touchField("organizationName")} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Công ty TNHH..." /></label>
             {touched.organizationName && validationErrors.organizationName && <small className="field-error wide-field">{validationErrors.organizationName}</small>}
             <label className="business-toggle wide-field"><input type="checkbox" checked={isBusinessSigning} onChange={(e) => { setIsBusinessSigning(e.target.checked); if (!e.target.checked) setTouched((prev) => ({ ...prev, taxCode: false })); }} /><span><strong>Ký doanh nghiệp</strong><small>Yêu cầu mã số thuế</small></span></label>
             {isBusinessSigning && <label className="wide-field tax-field"><span>Mã số thuế <em>*</em></span><input className={touched.taxCode && validationErrors.taxCode ? "invalid" : ""} value={form.taxCode} onBlur={() => touchField("taxCode")} onChange={(e) => setValue("taxCode", e.target.value)} placeholder="0123456789 hoặc 0123456789-001" inputMode="numeric" /></label>}
