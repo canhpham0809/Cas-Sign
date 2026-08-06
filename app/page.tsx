@@ -67,7 +67,7 @@ const defaultField = (page = 1, index = 0): SignatureField => ({
   page,
   xRatio: 0.52,
   yRatio: Math.min(0.82, 0.7 + (index % 3) * 0.1),
-  widthRatio: 0.38,
+  widthRatio: 0.34,
   heightRatio: 0.1,
   fieldType: "SIGNATURE",
 });
