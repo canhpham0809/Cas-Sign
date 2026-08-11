@@ -146,10 +146,35 @@ const sanitizeLogText = (value: string): string => value
   .replace(/\b\d{8,}\b/g, "[redacted-number]")
   .replace(/([?&](?:X-Amz-Signature|X-Amz-Credential)=)[^&]+/gi, "$1[redacted]");
 
+const decodeBase64ToUint8Array = (input: string): Uint8Array => {
+  let clean = input.trim().replace(/^"|"$/g, "").replace(/^data:application\/pdf;base64,/, "").replace(/[\s\r\n]+/g, "");
+  clean = clean.replace(/-/g, "+").replace(/_/g, "/");
+  const remainder = clean.length % 4;
+  if (remainder === 2) {
+    clean += "==";
+  } else if (remainder === 3) {
+    clean += "=";
+  }
+
+  try {
+    const binaryString = atob(clean);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+  } catch (e) {
+    if (typeof Buffer !== "undefined") {
+      return new Uint8Array(Buffer.from(clean, "base64"));
+    }
+    throw e;
+  }
+};
+
 const extractBase64String = (input: unknown): string | null => {
   if (typeof input === "string") {
     const trimmed = input.trim();
-    const clean = trimmed.replace(/^data:application\/pdf;base64,/, "").replace(/\s/g, "");
+    const clean = trimmed.replace(/^data:application\/pdf;base64,/, "").replace(/[\s\r\n]+/g, "");
     if (clean.length > 20 && !clean.startsWith("{") && !clean.startsWith("<")) {
       return clean;
     }
@@ -228,13 +253,9 @@ const fetchAndCacheSignedPdf = async (env: Env, identityKey: string): Promise<Re
       return Response.json({ message: "Không thể trích xuất dữ liệu file PDF từ phản hồi BankHub.", responsePreview: sanitizeLogText(text) }, { status: 502 });
     }
 
-    const binaryString = atob(base64String);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
+    const bytes = decodeBase64ToUint8Array(base64String);
 
-    const pdfResponse = new Response(bytes.buffer, {
+    const pdfResponse = new Response(bytes.buffer as ArrayBuffer, {
       status: 200,
       headers: {
         "content-type": "application/pdf",
