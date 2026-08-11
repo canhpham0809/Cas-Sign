@@ -358,11 +358,6 @@ const worker = {
 
           await saveSignStatus(env, statusToStore);
 
-          if (nextState === "COMPLETED" && identityKey) {
-            console.info("[esign.webhook] scheduling fetchAndCacheSignedPdf prefetch", { traceId, identityKey });
-            ctx.waitUntil(fetchAndCacheSignedPdf(env, identityKey));
-          }
-
           console.info("[esign.webhook] status stored successfully", {
             traceId,
             signRequestId,
