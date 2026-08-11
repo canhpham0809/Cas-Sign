@@ -316,54 +316,60 @@ const worker = {
 
       if (request.method === "POST") {
         try {
-          const payload = await request.json() as {
-            webhookType?: string;
-            webhookCode?: string;
-            environment?: string;
-            signRequest?: {
-              signRequestId?: string;
-              state?: string;
-              signedFileUrl?: string;
-              identityKey?: string;
-              identityKeyExpiresAt?: string;
-              expiresIn?: number;
-              rejectedReason?: string;
-            };
-          };
-          const signRequest = payload.signRequest;
-          const nextState = signRequest?.state?.toUpperCase();
+          const rawText = await request.text();
+          console.info("[esign.webhook] incoming body", { traceId, bodyPreview: sanitizeLogText(rawText) });
+          const payload = JSON.parse(rawText) as Record<string, any>;
+          const signRequest = (payload.signRequest || payload) as Record<string, any>;
+          const signRequestId = signRequest.signRequestId || signRequest.sign_request_id;
+          const nextState = String(signRequest.state || payload.state || "").toUpperCase();
+          const identityKey = signRequest.identityKey || signRequest.identity_key || payload.identityKey || payload.identity_key;
+          const identityKeyExpiresAt = signRequest.identityKeyExpiresAt || signRequest.identity_key_expires_at || payload.identityKeyExpiresAt || payload.identity_key_expires_at;
+          const signedFileUrl = signRequest.signedFileUrl || signRequest.signed_file_url || payload.signedFileUrl || payload.signed_file_url;
+          const rejectedReason = signRequest.rejectedReason || signRequest.rejected_reason || payload.rejectedReason || payload.rejected_reason;
+          const expiresIn = signRequest.expiresIn || signRequest.expires_in || payload.expiresIn || payload.expires_in;
+
+          const webhookType = payload.webhookType || payload.webhook_type;
+          const webhookCode = payload.webhookCode || payload.webhook_code;
+
           if (
-            payload.webhookType !== "SIGN"
-            || payload.webhookCode !== "DEFAULT_UPDATE"
-            || !signRequest?.signRequestId
+            (webhookType && webhookType !== "SIGN")
+            || (webhookCode && webhookCode !== "DEFAULT_UPDATE")
+            || !signRequestId
             || !nextState
             || !["COMPLETED", "REJECTED"].includes(nextState)
           ) {
+            console.warn("[esign.webhook] rejected invalid payload structure", { traceId, signRequestId, nextState, webhookType, webhookCode });
             return Response.json({ message: "Payload webhook không hợp lệ.", traceId }, { status: 400 });
           }
-          await saveSignStatus(env, {
-            signRequestId: signRequest.signRequestId,
+
+          const statusToStore: StoredSignStatus = {
+            signRequestId,
             state: nextState,
-            signedFileUrl: signRequest.signedFileUrl,
-            identityKey: signRequest.identityKey,
-            identityKeyExpiresAt: signRequest.identityKeyExpiresAt,
-            expiresIn: signRequest.expiresIn,
-            rejectedReason: signRequest.rejectedReason,
+            signedFileUrl,
+            identityKey,
+            identityKeyExpiresAt,
+            expiresIn,
+            rejectedReason,
             lastUpdatedAt: new Date().toISOString(),
-          });
-          if (nextState === "COMPLETED" && signRequest.identityKey) {
-            ctx.waitUntil(fetchAndCacheSignedPdf(env, signRequest.identityKey));
+          };
+
+          await saveSignStatus(env, statusToStore);
+
+          if (nextState === "COMPLETED" && identityKey) {
+            console.info("[esign.webhook] scheduling fetchAndCacheSignedPdf prefetch", { traceId, identityKey });
+            ctx.waitUntil(fetchAndCacheSignedPdf(env, identityKey));
           }
-          console.info("[esign.webhook] status stored", {
+
+          console.info("[esign.webhook] status stored successfully", {
             traceId,
-            signRequestId: signRequest.signRequestId,
+            signRequestId,
             state: nextState,
-            hasIdentityKey: Boolean(signRequest.identityKey),
+            hasIdentityKey: Boolean(identityKey),
           });
           return Response.json({ ok: true, traceId });
         } catch (error) {
           const message = error instanceof Error ? error.message : "Không thể xử lý webhook.";
-          console.error("[esign.webhook] invalid request", { traceId, message: sanitizeLogText(message) });
+          console.error("[esign.webhook] invalid request exception", { traceId, message: sanitizeLogText(message) });
           return Response.json({ message: "Payload webhook không hợp lệ.", traceId }, { status: 400 });
         }
       }

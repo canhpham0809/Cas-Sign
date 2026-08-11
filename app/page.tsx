@@ -281,12 +281,14 @@ export default function Home() {
           if (nextState === "COMPLETED") {
             es.close();
             eventSourceRef.current = null;
-            if (signStatus?.signedFileUrl) {
+            const targetKey = signStatus?.identityKey || signStatus?.identity_key;
+            const targetUrl = signStatus?.signedFileUrl || signStatus?.signed_file_url;
+            if (targetKey || targetUrl) {
               setIsReplacingSignedFile(true);
               setStatus("processing");
               setMessage("Đã nhận callback Webhook thành công! Đang tải bản PDF đã ký...");
               try {
-                await replaceWithSignedPdf(signStatus.signedFileUrl, signRequestId);
+                await replaceWithSignedPdf({ identityKey: targetKey, url: targetUrl }, signRequestId);
                 setStatus("completed");
                 setSignedAt(signStatus.signedAt || signStatus.lastUpdatedAt || new Date().toISOString());
                 setMessage("Tài liệu đã ký hoàn tất. Bản xem trước đã được cập nhật.");
