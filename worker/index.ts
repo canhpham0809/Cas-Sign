@@ -146,11 +146,85 @@ const sanitizeLogText = (value: string): string => value
   .replace(/\b\d{8,}\b/g, "[redacted-number]")
   .replace(/([?&](?:X-Amz-Signature|X-Amz-Credential)=)[^&]+/gi, "$1[redacted]");
 
-// Image security config. SVG sources with .svg extension auto-skip the
-// optimization endpoint on the client side (served directly, no proxy).
-// To route SVGs through the optimizer (with security headers), set
-// dangerouslyAllowSVG: true in next.config.js and uncomment below:
-// const imageConfig: ImageConfig = { dangerouslyAllowSVG: true };
+const fetchAndCacheSignedPdf = async (env: Env, identityKey: string): Promise<Response | null> => {
+  try {
+    const cache = statusCache();
+    const key = pdfCacheKey(identityKey);
+    const cachedResponse = await cache.match(key);
+    if (cachedResponse) {
+      return cachedResponse;
+    }
+    if (!env.ESIGN_CLIENT_ID || !env.ESIGN_SECRET_KEY) {
+      console.warn("[esign.download] missing credentials for prefetch", { identityKey });
+      return null;
+    }
+    const apiBase = (env.ESIGN_API_URL || "https://sandbox.bankhub.dev/esign/push-request-document")
+      .replace(/\/(push-request-document|download-file|request-status)\/?$/, "");
+
+    console.info("[esign.download] calling BankHub download-file API", {
+      identityKey,
+      upstreamUrl: `${apiBase}/download-file`,
+    });
+
+    const upstream = await fetch(`${apiBase}/download-file`, {
+      method: "POST",
+      headers: {
+        "x-client-id": env.ESIGN_CLIENT_ID,
+        "x-secret-key": env.ESIGN_SECRET_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ identityKey }),
+    });
+
+    if (!upstream.ok) {
+      const errText = await upstream.text();
+      console.error("[esign.download] BankHub download-file rejected", {
+        identityKey,
+        status: upstream.status,
+        response: sanitizeLogText(errText),
+      });
+      return null;
+    }
+
+    const text = await upstream.text();
+    let base64String = text.trim();
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed === "string") {
+        base64String = parsed;
+      } else if (parsed && typeof parsed === "object") {
+        base64String = parsed.file || parsed.data || parsed.fileContent || parsed.pdfBase64 || parsed.base64 || parsed.content || text;
+      }
+    } catch {
+      // raw text
+    }
+
+    base64String = base64String.replace(/^data:application\/pdf;base64,/, "").replace(/\s/g, "");
+    const binaryString = atob(base64String);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+
+    const pdfResponse = new Response(bytes.buffer, {
+      status: 200,
+      headers: {
+        "content-type": "application/pdf",
+        "cache-control": "public, max-age=86400",
+      },
+    });
+
+    await cache.put(key, pdfResponse.clone());
+    console.info("[esign.download] successfully downloaded & cached signed PDF", {
+      identityKey,
+      bytesCount: bytes.length,
+    });
+    return pdfResponse;
+  } catch (error) {
+    console.error("[esign.download] download exception", { identityKey, error });
+    return null;
+  }
+};
 
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -277,10 +351,14 @@ const worker = {
             rejectedReason: signRequest.rejectedReason,
             lastUpdatedAt: new Date().toISOString(),
           });
+          if (nextState === "COMPLETED" && signRequest.identityKey) {
+            ctx.waitUntil(fetchAndCacheSignedPdf(env, signRequest.identityKey));
+          }
           console.info("[esign.webhook] status stored", {
             traceId,
             signRequestId: signRequest.signRequestId,
             state: nextState,
+            hasIdentityKey: Boolean(signRequest.identityKey),
           });
           return Response.json({ ok: true, traceId });
         } catch (error) {
@@ -385,66 +463,11 @@ const worker = {
       }
 
       if (identityKey) {
-        try {
-          const cachedResponse = await statusCache().match(pdfCacheKey(identityKey));
-          if (cachedResponse) {
-            return cachedResponse;
-          }
-          if (!env.ESIGN_CLIENT_ID || !env.ESIGN_SECRET_KEY) {
-            return Response.json({ message: "Máy chủ chưa được cấu hình thông tin kết nối API ký số." }, { status: 500 });
-          }
-          const apiBase = (env.ESIGN_API_URL || "https://sandbox.bankhub.dev/esign/push-request-document")
-            .replace(/\/(push-request-document|download-file)\/?$/, "");
-          const upstream = await fetch(`${apiBase}/download-file`, {
-            method: "POST",
-            headers: {
-              "x-client-id": env.ESIGN_CLIENT_ID,
-              "x-secret-key": env.ESIGN_SECRET_KEY,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ identityKey }),
-          });
-
-          if (!upstream.ok) {
-            const payload = await upstream.arrayBuffer();
-            const contentType = upstream.headers.get("content-type") || "application/json";
-            return new Response(payload, { status: upstream.status, headers: { "content-type": contentType } });
-          }
-
-          const text = await upstream.text();
-          let base64String = text.trim();
-          try {
-            const parsed = JSON.parse(text);
-            if (typeof parsed === "string") {
-              base64String = parsed;
-            } else if (parsed && typeof parsed === "object") {
-              base64String = parsed.file || parsed.data || parsed.fileContent || parsed.pdfBase64 || parsed.base64 || parsed.content || text;
-            }
-          } catch {
-            // raw string
-          }
-
-          base64String = base64String.replace(/^data:application\/pdf;base64,/, "").replace(/\s/g, "");
-          const binaryString = atob(base64String);
-          const bytes = new Uint8Array(binaryString.length);
-          for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-          }
-
-          const pdfResponse = new Response(bytes.buffer, {
-            status: 200,
-            headers: {
-              "content-type": "application/pdf",
-              "cache-control": "public, max-age=86400",
-            },
-          });
-
-          ctx.waitUntil(statusCache().put(pdfCacheKey(identityKey), pdfResponse.clone()));
-          return pdfResponse;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "Không thể tải file đã ký.";
-          return Response.json({ message }, { status: 502 });
+        const response = await fetchAndCacheSignedPdf(env, identityKey);
+        if (response) {
+          return response;
         }
+        return Response.json({ message: "Không thể tải file đã ký từ hệ thống BankHub." }, { status: 502 });
       }
 
       if (signedFileUrl) {
