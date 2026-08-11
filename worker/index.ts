@@ -307,14 +307,15 @@ const worker = {
           return Response.json({ message: "Máy chủ chưa được cấu hình thông tin kết nối API ký số." }, { status: 500 });
         }
         const apiBase = (env.ESIGN_API_URL || "https://sandbox.bankhub.dev/esign/push-request-document")
-          .replace(/\/push-request-document\/?$/, "");
-        const upstream = await fetch(`${apiBase}/requests/${encodeURIComponent(signRequestId)}/status`, {
-          method: "GET",
+          .replace(/\/(push-request-document|download-file|request-status)\/?$/, "");
+        const upstream = await fetch(`${apiBase}/request-status`, {
+          method: "POST",
           headers: {
             "x-client-id": env.ESIGN_CLIENT_ID,
             "x-secret-key": env.ESIGN_SECRET_KEY,
             "Content-Type": "application/json",
           },
+          body: JSON.stringify({ signRequestId }),
         });
         const contentType = upstream.headers.get("content-type") || "application/json";
         const payload = await upstream.arrayBuffer();
@@ -328,17 +329,22 @@ const worker = {
               const normalizedStatus: StoredSignStatus = {
                 signRequestId: upstreamStatus.signRequestId || signRequestId,
                 state,
-                signedFileUrl: upstreamStatus.signedFileUrl,
-                identityKey: upstreamStatus.identityKey,
-                identityKeyExpiresAt: upstreamStatus.identityKeyExpiresAt,
-                expiresIn: upstreamStatus.expiresIn,
-                rejectedReason: upstreamStatus.rejectedReason,
+                signedFileUrl: upstreamStatus.signedFileUrl || storedStatus?.signedFileUrl,
+                identityKey: upstreamStatus.identityKey || storedStatus?.identityKey,
+                identityKeyExpiresAt: upstreamStatus.identityKeyExpiresAt || storedStatus?.identityKeyExpiresAt,
+                expiresIn: upstreamStatus.expiresIn || storedStatus?.expiresIn,
+                rejectedReason: upstreamStatus.rejectedReason || storedStatus?.rejectedReason,
                 lastUpdatedAt: upstreamStatus.lastUpdatedAt || new Date().toISOString(),
               };
               ctx.waitUntil(saveSignStatus(env, normalizedStatus));
               return Response.json({ requestId: "upstream-api", signRequestStatus: normalizedStatus, ...parsed });
             }
-            return Response.json({ signRequestStatus: upstreamStatus, ...parsed });
+            const mergedStatus = {
+              ...(upstreamStatus || {}),
+              identityKey: upstreamStatus?.identityKey || storedStatus?.identityKey,
+              identityKeyExpiresAt: upstreamStatus?.identityKeyExpiresAt || storedStatus?.identityKeyExpiresAt,
+            };
+            return Response.json({ signRequestStatus: mergedStatus, ...parsed });
           } catch {
             // Return BankHub's response unchanged if it is not valid JSON.
           }
