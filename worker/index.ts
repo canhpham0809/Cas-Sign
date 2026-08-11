@@ -24,6 +24,8 @@ type StoredSignStatus = {
   signRequestId: string;
   state: string;
   signedFileUrl?: string;
+  identityKey?: string;
+  identityKeyExpiresAt?: string;
   expiresIn?: number;
   rejectedReason?: string;
   lastUpdatedAt: string;
@@ -92,6 +94,9 @@ export class SignStatusStore extends DurableObject<Env> {
 
 const statusCacheKey = (signRequestId: string): Request =>
   new Request(`https://sign-status.internal/status/${encodeURIComponent(signRequestId)}`);
+
+const pdfCacheKey = (identityKey: string): Request =>
+  new Request(`https://sign-status.internal/pdf/${encodeURIComponent(identityKey)}`);
 
 const statusCache = (): Cache => (caches as CacheStorage & { default: Cache }).default;
 
@@ -240,10 +245,13 @@ const worker = {
           const payload = await request.json() as {
             webhookType?: string;
             webhookCode?: string;
+            environment?: string;
             signRequest?: {
               signRequestId?: string;
               state?: string;
               signedFileUrl?: string;
+              identityKey?: string;
+              identityKeyExpiresAt?: string;
               expiresIn?: number;
               rejectedReason?: string;
             };
@@ -259,13 +267,12 @@ const worker = {
           ) {
             return Response.json({ message: "Payload webhook không hợp lệ.", traceId }, { status: 400 });
           }
-          if (nextState === "COMPLETED" && !signRequest.signedFileUrl) {
-            return Response.json({ message: "Webhook hoàn tất thiếu signedFileUrl.", traceId }, { status: 400 });
-          }
           await saveSignStatus(env, {
             signRequestId: signRequest.signRequestId,
             state: nextState,
             signedFileUrl: signRequest.signedFileUrl,
+            identityKey: signRequest.identityKey,
+            identityKeyExpiresAt: signRequest.identityKeyExpiresAt,
             expiresIn: signRequest.expiresIn,
             rejectedReason: signRequest.rejectedReason,
             lastUpdatedAt: new Date().toISOString(),
@@ -322,6 +329,8 @@ const worker = {
                 signRequestId: upstreamStatus.signRequestId || signRequestId,
                 state,
                 signedFileUrl: upstreamStatus.signedFileUrl,
+                identityKey: upstreamStatus.identityKey,
+                identityKeyExpiresAt: upstreamStatus.identityKeyExpiresAt,
                 expiresIn: upstreamStatus.expiresIn,
                 rejectedReason: upstreamStatus.rejectedReason,
                 lastUpdatedAt: upstreamStatus.lastUpdatedAt || new Date().toISOString(),
@@ -355,33 +364,109 @@ const worker = {
       return Response.json({ message: "Durable Object chưa được cấu hình." }, { status: 501 });
     }
 
-    if (url.pathname === "/api/esign/signed-file" && request.method === "GET") {
-      const signedFileUrl = url.searchParams.get("url");
-      if (!signedFileUrl) {
-        return Response.json({ message: "Thiếu đường dẫn file đã ký." }, { status: 400 });
-      }
-      try {
-        const target = new URL(signedFileUrl);
-        const allowedHost = target.protocol === "https:" && (
-          target.hostname === "s3.hn-2.cloud.cmctelecom.vn" || target.hostname.endsWith(".cloud.cmctelecom.vn")
-        );
-        if (!allowedHost) {
-          return Response.json({ message: "Đường dẫn file đã ký không hợp lệ." }, { status: 400 });
+    if (url.pathname === "/api/esign/signed-file" && ["GET", "POST"].includes(request.method)) {
+      let identityKey = url.searchParams.get("identityKey");
+      let signedFileUrl = url.searchParams.get("url");
+
+      if (request.method === "POST" && !identityKey && !signedFileUrl) {
+        try {
+          const body = await request.json() as { identityKey?: string; url?: string };
+          identityKey = body.identityKey || identityKey;
+          signedFileUrl = body.url || signedFileUrl;
+        } catch {
+          // ignore invalid json body
         }
-        const upstream = await fetch(target.toString());
-        if (!upstream.ok) {
-          return Response.json({ message: "Không thể tải file đã ký từ hệ thống lưu trữ." }, { status: upstream.status });
-        }
-        return new Response(upstream.body, {
-          status: 200,
-          headers: {
-            "content-type": upstream.headers.get("content-type") || "application/pdf",
-            "cache-control": "no-store",
-          },
-        });
-      } catch {
-        return Response.json({ message: "Không thể tải file đã ký." }, { status: 502 });
       }
+
+      if (identityKey) {
+        try {
+          const cachedResponse = await statusCache().match(pdfCacheKey(identityKey));
+          if (cachedResponse) {
+            return cachedResponse;
+          }
+          if (!env.ESIGN_CLIENT_ID || !env.ESIGN_SECRET_KEY) {
+            return Response.json({ message: "Máy chủ chưa được cấu hình thông tin kết nối API ký số." }, { status: 500 });
+          }
+          const apiBase = (env.ESIGN_API_URL || "https://sandbox.bankhub.dev/esign/push-request-document")
+            .replace(/\/(push-request-document|download-file)\/?$/, "");
+          const upstream = await fetch(`${apiBase}/download-file`, {
+            method: "POST",
+            headers: {
+              "x-client-id": env.ESIGN_CLIENT_ID,
+              "x-secret-key": env.ESIGN_SECRET_KEY,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ identityKey }),
+          });
+
+          if (!upstream.ok) {
+            const payload = await upstream.arrayBuffer();
+            const contentType = upstream.headers.get("content-type") || "application/json";
+            return new Response(payload, { status: upstream.status, headers: { "content-type": contentType } });
+          }
+
+          const text = await upstream.text();
+          let base64String = text.trim();
+          try {
+            const parsed = JSON.parse(text);
+            if (typeof parsed === "string") {
+              base64String = parsed;
+            } else if (parsed && typeof parsed === "object") {
+              base64String = parsed.file || parsed.data || parsed.fileContent || parsed.pdfBase64 || parsed.base64 || parsed.content || text;
+            }
+          } catch {
+            // raw string
+          }
+
+          base64String = base64String.replace(/^data:application\/pdf;base64,/, "").replace(/\s/g, "");
+          const binaryString = atob(base64String);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+
+          const pdfResponse = new Response(bytes.buffer, {
+            status: 200,
+            headers: {
+              "content-type": "application/pdf",
+              "cache-control": "public, max-age=86400",
+            },
+          });
+
+          ctx.waitUntil(statusCache().put(pdfCacheKey(identityKey), pdfResponse.clone()));
+          return pdfResponse;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Không thể tải file đã ký.";
+          return Response.json({ message }, { status: 502 });
+        }
+      }
+
+      if (signedFileUrl) {
+        try {
+          const target = new URL(signedFileUrl);
+          const allowedHost = target.protocol === "https:" && (
+            target.hostname === "s3.hn-2.cloud.cmctelecom.vn" || target.hostname.endsWith(".cloud.cmctelecom.vn")
+          );
+          if (!allowedHost) {
+            return Response.json({ message: "Đường dẫn file đã ký không hợp lệ." }, { status: 400 });
+          }
+          const upstream = await fetch(target.toString());
+          if (!upstream.ok) {
+            return Response.json({ message: "Không thể tải file đã ký từ hệ thống lưu trữ." }, { status: upstream.status });
+          }
+          return new Response(upstream.body, {
+            status: 200,
+            headers: {
+              "content-type": upstream.headers.get("content-type") || "application/pdf",
+              "cache-control": "no-store",
+            },
+          });
+        } catch {
+          return Response.json({ message: "Không thể tải file đã ký." }, { status: 502 });
+        }
+      }
+
+      return Response.json({ message: "Thiếu identityKey hoặc đường dẫn file đã ký." }, { status: 400 });
     }
 
     if (url.pathname === "/_vinext/image") {

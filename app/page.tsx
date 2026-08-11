@@ -40,6 +40,8 @@ type SignStatusResponse = {
     lastUpdatedAt?: string;
     signedAt?: string;
     signedFileUrl?: string;
+    identityKey?: string;
+    identityKeyExpiresAt?: string;
     expiresIn?: number;
     rejectedReason?: string;
   };
@@ -276,22 +278,28 @@ export default function Home() {
           const signStatus = JSON.parse(event.data) as Record<string, any>;
           const nextState = signStatus?.state?.toUpperCase();
 
-          if (nextState === "COMPLETED" && signStatus?.signedFileUrl) {
+          if (nextState === "COMPLETED") {
             es.close();
             eventSourceRef.current = null;
-            setIsReplacingSignedFile(true);
-            setStatus("processing");
-            setMessage("Đã nhận callback Webhook thành công! Đang tải bản PDF đã ký...");
-            try {
-              await replaceWithSignedPdf(signStatus.signedFileUrl, signRequestId);
+            if (signStatus?.signedFileUrl) {
+              setIsReplacingSignedFile(true);
+              setStatus("processing");
+              setMessage("Đã nhận callback Webhook thành công! Đang tải bản PDF đã ký...");
+              try {
+                await replaceWithSignedPdf(signStatus.signedFileUrl, signRequestId);
+                setStatus("completed");
+                setSignedAt(signStatus.signedAt || signStatus.lastUpdatedAt || new Date().toISOString());
+                setMessage("Tài liệu đã ký hoàn tất. Bản xem trước đã được cập nhật.");
+              } catch (error) {
+                setStatus("completed");
+                setMessage(error instanceof Error ? error.message : "Đã ký xong nhưng chưa thể hiển thị file đã ký.");
+              } finally {
+                setIsReplacingSignedFile(false);
+              }
+            } else {
               setStatus("completed");
               setSignedAt(signStatus.signedAt || signStatus.lastUpdatedAt || new Date().toISOString());
-              setMessage("Tài liệu đã ký hoàn tất. Bản xem trước đã được cập nhật.");
-            } catch (error) {
-              setStatus("completed");
-              setMessage(error instanceof Error ? error.message : "Đã ký xong nhưng chưa thể hiển thị file đã ký.");
-            } finally {
-              setIsReplacingSignedFile(false);
+              setMessage("Tài liệu đã ký hoàn tất.");
             }
           } else if (["REJECTED", "FAILED", "CANCELLED", "EXPIRED"].includes(nextState || "")) {
             es.close();
@@ -315,8 +323,11 @@ export default function Home() {
     }
   };
 
-  const replaceWithSignedPdf = async (url: string, signRequestId: string) => {
-    const response = await fetch(`/api/esign/signed-file?url=${encodeURIComponent(url)}`, { cache: "no-store" });
+  const replaceWithSignedPdf = async (options: { identityKey?: string; url?: string }, signRequestId: string) => {
+    const query = options.identityKey
+      ? `identityKey=${encodeURIComponent(options.identityKey)}`
+      : `url=${encodeURIComponent(options.url || "")}`;
+    const response = await fetch(`/api/esign/signed-file?${query}`, { cache: "no-store" });
     if (!response.ok) throw new Error("Không thể tải bản PDF đã ký để hiển thị.");
     const blob = await response.blob();
     const signedFile = new File([blob], `${signRequestId}-signed.pdf`, { type: "application/pdf" });
@@ -340,13 +351,16 @@ export default function Home() {
       if (!response.ok) throw new Error(result.message || result.error || "Không thể lấy trạng thái ký.");
       const signStatus = result.signRequestStatus || (result.signRequestId || result.state ? result : result.data);
       const nextState = signStatus?.state?.toUpperCase();
-      if (nextState === "COMPLETED" && signStatus?.signedFileUrl) {
+      const targetKey = signStatus?.identityKey;
+      const targetUrl = signStatus?.signedFileUrl;
+
+      if (nextState === "COMPLETED" && (targetKey || targetUrl)) {
         setIsReplacingSignedFile(true);
         setStatus("processing");
         setMessage("Đã ký hoàn tất. Đang cập nhật bản PDF đã ký...");
         try {
           await new Promise((resolve) => setTimeout(resolve, 500));
-          await replaceWithSignedPdf(signStatus.signedFileUrl, activeRequestId);
+          await replaceWithSignedPdf({ identityKey: targetKey, url: targetUrl }, activeRequestId);
           setStatus("completed");
           setSignedAt(signStatus.signedAt || signStatus.lastUpdatedAt || "");
           setMessage("Tài liệu đã ký hoàn tất. Bản xem trước đã được cập nhật.");
@@ -361,7 +375,7 @@ export default function Home() {
       if (nextState === "COMPLETED") {
         setStatus("completed");
         setSignedAt(signStatus?.signedAt || signStatus?.lastUpdatedAt || "");
-        setMessage("Tài liệu đã ký hoàn tất nhưng API chưa trả về đường dẫn file đã ký.");
+        setMessage("Tài liệu đã ký hoàn tất.");
         return;
       }
       if (["REJECTED", "FAILED", "CANCELLED", "EXPIRED"].includes(nextState || "")) {
@@ -521,7 +535,7 @@ export default function Home() {
       }))));
       body.append("file", file);
       const response = await fetch("/api/esign", { method: "POST", body });
-      const result = await response.json().catch(() => ({}));
+      const result = (await response.json().catch(() => ({}))) as Record<string, any>;
       if (!response.ok) {
         const traceId = response.headers.get("x-cas-trace-id") || result?.traceId;
         const baseMessage = result?.message || result?.error || "Dịch vụ ký số chưa phản hồi thành công.";
