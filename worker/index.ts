@@ -166,21 +166,34 @@ const fetchAndCacheSignedPdf = async (env: Env, identityKey: string): Promise<Re
       upstreamUrl: `${apiBase}/download-file`,
     });
 
-    const upstream = await fetch(`${apiBase}/download-file`, {
-      method: "POST",
-      headers: {
-        "x-client-id": env.ESIGN_CLIENT_ID,
-        "x-secret-key": env.ESIGN_SECRET_KEY,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ identityKey }),
-    });
+    let upstream: Response | null = null;
+    let errText = "";
 
-    if (!upstream.ok) {
-      const errText = await upstream.text();
-      console.error("[esign.download] BankHub download-file rejected", {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (attempt > 1) {
+        console.info("[esign.download] retrying download-file API after delay", { identityKey, attempt });
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      upstream = await fetch(`${apiBase}/download-file`, {
+        method: "POST",
+        headers: {
+          "x-client-id": env.ESIGN_CLIENT_ID,
+          "x-secret-key": env.ESIGN_SECRET_KEY,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ identityKey }),
+      });
+
+      if (upstream.ok) {
+        break;
+      }
+      errText = await upstream.text();
+    }
+
+    if (!upstream || !upstream.ok) {
+      console.error("[esign.download] BankHub download-file rejected after retries", {
         identityKey,
-        status: upstream.status,
+        status: upstream?.status || 500,
         response: sanitizeLogText(errText),
       });
       return null;
@@ -364,7 +377,7 @@ const worker = {
             traceId,
             signRequestId,
             state: nextState,
-            hasIdentityKey: Boolean(identityKey),
+            identityKey,
           });
           return Response.json({ ok: true, traceId });
         } catch (error) {
