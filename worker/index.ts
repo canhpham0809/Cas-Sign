@@ -146,17 +146,42 @@ const sanitizeLogText = (value: string): string => value
   .replace(/\b\d{8,}\b/g, "[redacted-number]")
   .replace(/([?&](?:X-Amz-Signature|X-Amz-Credential)=)[^&]+/gi, "$1[redacted]");
 
+const extractBase64String = (input: unknown): string | null => {
+  if (typeof input === "string") {
+    const trimmed = input.trim();
+    const clean = trimmed.replace(/^data:application\/pdf;base64,/, "").replace(/\s/g, "");
+    if (clean.length > 20 && !clean.startsWith("{") && !clean.startsWith("<")) {
+      return clean;
+    }
+  }
+  if (input && typeof input === "object") {
+    const keysToTry = ["file", "data", "fileContent", "file_content", "pdfBase64", "pdf_base64", "base64", "base64Data", "base64_data", "content", "document", "signedFile", "signed_file"];
+    for (const key of keysToTry) {
+      if ((input as Record<string, any>)[key]) {
+        const found = extractBase64String((input as Record<string, any>)[key]);
+        if (found) return found;
+      }
+    }
+    for (const val of Object.values(input as Record<string, any>)) {
+      const found = extractBase64String(val);
+      if (found) return found;
+    }
+  }
+  return null;
+};
+
 const fetchAndCacheSignedPdf = async (env: Env, identityKey: string): Promise<Response | null> => {
   try {
     const cache = statusCache();
     const key = pdfCacheKey(identityKey);
     const cachedResponse = await cache.match(key);
     if (cachedResponse) {
+      console.info("[esign.download] returning cached PDF", { identityKey });
       return cachedResponse;
     }
     if (!env.ESIGN_CLIENT_ID || !env.ESIGN_SECRET_KEY) {
-      console.warn("[esign.download] missing credentials for prefetch", { identityKey });
-      return null;
+      console.warn("[esign.download] missing credentials", { identityKey });
+      return Response.json({ message: "Máy chủ chưa được cấu hình thông tin kết nối API ký số." }, { status: 500 });
     }
     const apiBase = (env.ESIGN_API_URL || "https://sandbox.bankhub.dev/esign/push-request-document")
       .replace(/\/(push-request-document|download-file|request-status)\/?$/, "");
@@ -190,19 +215,19 @@ const fetchAndCacheSignedPdf = async (env: Env, identityKey: string): Promise<Re
       });
     }
 
-    let base64String = text.trim();
+    let parsedJson: unknown = null;
     try {
-      const parsed = JSON.parse(text);
-      if (typeof parsed === "string") {
-        base64String = parsed;
-      } else if (parsed && typeof parsed === "object") {
-        base64String = parsed.file || parsed.data || parsed.fileContent || parsed.pdfBase64 || parsed.base64 || parsed.content || text;
-      }
+      parsedJson = JSON.parse(text);
     } catch {
-      // raw text
+      // plain text
     }
 
-    base64String = base64String.replace(/^data:application\/pdf;base64,/, "").replace(/\s/g, "");
+    const base64String = extractBase64String(parsedJson || text);
+    if (!base64String) {
+      console.error("[esign.download] could not extract base64 pdf string from BankHub response", { identityKey, responsePreview: sanitizeLogText(text) });
+      return Response.json({ message: "Không thể trích xuất dữ liệu file PDF từ phản hồi BankHub.", responsePreview: sanitizeLogText(text) }, { status: 502 });
+    }
+
     const binaryString = atob(base64String);
     const bytes = new Uint8Array(binaryString.length);
     for (let i = 0; i < binaryString.length; i++) {
@@ -224,7 +249,11 @@ const fetchAndCacheSignedPdf = async (env: Env, identityKey: string): Promise<Re
     });
     return pdfResponse;
   } catch (error) {
-    console.error("[esign.download] download exception", { identityKey, error });
+    console.error("[esign.download] download exception details", {
+      identityKey,
+      errorMessage: error instanceof Error ? error.message : String(error),
+      errorStack: error instanceof Error ? error.stack : undefined,
+    });
     return null;
   }
 };
