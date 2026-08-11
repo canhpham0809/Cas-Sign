@@ -226,36 +226,49 @@ const fetchAndCacheSignedPdf = async (env: Env, identityKey: string): Promise<Re
       body: JSON.stringify({ identityKey }),
     });
 
-    const text = await upstream.text();
-    console.info("[esign.download] BankHub download-file raw response", {
-      identityKey,
-      status: upstream.status,
-      responseBody: sanitizeLogText(text),
-    });
+    const buffer = await upstream.arrayBuffer();
+    const contentType = upstream.headers.get("content-type") || "";
 
     if (!upstream.ok) {
-      return new Response(text, {
+      return new Response(buffer, {
         status: upstream.status,
-        headers: { "content-type": upstream.headers.get("content-type") || "application/json" },
+        headers: { "content-type": contentType || "application/json" },
       });
     }
 
-    let parsedJson: unknown = null;
-    try {
-      parsedJson = JSON.parse(text);
-    } catch {
-      // plain text
+    const headerSnippet = new TextDecoder().decode(buffer.slice(0, 10));
+    const isDirectPdf = headerSnippet.startsWith("%PDF-") || contentType.includes("application/pdf");
+
+    let pdfBytes: Uint8Array;
+
+    if (isDirectPdf) {
+      console.info("[esign.download] received direct PDF binary stream from BankHub", { identityKey, bytesCount: buffer.byteLength });
+      pdfBytes = new Uint8Array(buffer);
+    } else {
+      const text = new TextDecoder().decode(buffer);
+      console.info("[esign.download] BankHub download-file raw response", {
+        identityKey,
+        status: upstream.status,
+        responseBody: sanitizeLogText(text),
+      });
+
+      let parsedJson: unknown = null;
+      try {
+        parsedJson = JSON.parse(text);
+      } catch {
+        // plain text
+      }
+
+      const base64String = extractBase64String(parsedJson || text);
+      if (!base64String) {
+        console.error("[esign.download] could not extract base64 pdf string from BankHub response", { identityKey, responsePreview: sanitizeLogText(text) });
+        return Response.json({ message: "Không thể trích xuất dữ liệu file PDF từ phản hồi BankHub.", responsePreview: sanitizeLogText(text) }, { status: 502 });
+      }
+
+      pdfBytes = decodeBase64ToUint8Array(base64String);
     }
 
-    const base64String = extractBase64String(parsedJson || text);
-    if (!base64String) {
-      console.error("[esign.download] could not extract base64 pdf string from BankHub response", { identityKey, responsePreview: sanitizeLogText(text) });
-      return Response.json({ message: "Không thể trích xuất dữ liệu file PDF từ phản hồi BankHub.", responsePreview: sanitizeLogText(text) }, { status: 502 });
-    }
-
-    const bytes = decodeBase64ToUint8Array(base64String);
-
-    const pdfResponse = new Response(bytes.buffer as ArrayBuffer, {
+    const pdfResponse = new Response(pdfBytes.buffer as ArrayBuffer, {
       status: 200,
       headers: {
         "content-type": "application/pdf",
@@ -266,7 +279,7 @@ const fetchAndCacheSignedPdf = async (env: Env, identityKey: string): Promise<Re
     await cache.put(key, pdfResponse.clone());
     console.info("[esign.download] successfully downloaded & cached signed PDF", {
       identityKey,
-      bytesCount: bytes.length,
+      bytesCount: pdfBytes.length,
     });
     return pdfResponse;
   } catch (error) {
