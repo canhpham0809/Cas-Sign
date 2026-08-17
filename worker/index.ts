@@ -363,17 +363,41 @@ const worker = {
 
     if (url.pathname === "/api/esign/webhook") {
       const traceId = crypto.randomUUID();
+
+      if (request.method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS, HEAD",
+            "Access-Control-Allow-Headers": "*",
+          },
+        });
+      }
+
       if (!env.ESIGN_WEBHOOK_SECRET) {
         console.error("[esign.webhook] missing webhook secret", { traceId });
         return Response.json({ message: "Webhook chưa được cấu hình.", traceId }, { status: 500 });
       }
-      if (url.searchParams.get("token") !== env.ESIGN_WEBHOOK_SECRET) {
+
+      const receivedToken =
+        url.searchParams.get("token")
+        || request.headers.get("x-webhook-token")
+        || request.headers.get("x-token")
+        || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+
+      if (receivedToken !== env.ESIGN_WEBHOOK_SECRET) {
         console.warn("[esign.webhook] unauthorized", { traceId });
         return Response.json({ message: "Webhook token không hợp lệ.", traceId }, { status: 401 });
       }
 
+      if (request.method === "HEAD") {
+        return new Response(null, { status: 200 });
+      }
+
       if (request.method === "GET") {
         return Response.json({
+          ok: true,
           status: "active",
           message: "Webhook URL hợp lệ và đang hoạt động. BankHub sẽ gửi callback bằng phương thức POST.",
           traceId,
@@ -384,7 +408,18 @@ const worker = {
         try {
           const rawText = await request.text();
           console.info("[esign.webhook] incoming body", { traceId, bodyPreview: sanitizeLogText(rawText) });
-          const payload = JSON.parse(rawText) as Record<string, any>;
+
+          if (!rawText || !rawText.trim()) {
+            return Response.json({ ok: true, message: "Webhook ping received", traceId });
+          }
+
+          let payload: Record<string, any> = {};
+          try {
+            payload = JSON.parse(rawText) as Record<string, any>;
+          } catch {
+            return Response.json({ ok: true, message: "Webhook ping received", traceId });
+          }
+
           const signRequest = (payload.signRequest || payload) as Record<string, any>;
           const signRequestId = signRequest.signRequestId || signRequest.sign_request_id;
           const nextState = String(signRequest.state || payload.state || "").toUpperCase();
@@ -394,18 +429,17 @@ const worker = {
           const rejectedReason = signRequest.rejectedReason || signRequest.rejected_reason || payload.rejectedReason || payload.rejected_reason;
           const expiresIn = signRequest.expiresIn || signRequest.expires_in || payload.expiresIn || payload.expires_in;
 
-          const webhookType = payload.webhookType || payload.webhook_type;
-          const webhookCode = payload.webhookCode || payload.webhook_code;
-
-          if (
-            (webhookType && webhookType !== "SIGN")
-            || (webhookCode && webhookCode !== "DEFAULT_UPDATE")
-            || !signRequestId
-            || !nextState
-            || !["COMPLETED", "REJECTED"].includes(nextState)
-          ) {
-            console.warn("[esign.webhook] rejected invalid payload structure", { traceId, signRequestId, nextState, webhookType, webhookCode });
-            return Response.json({ message: "Payload webhook không hợp lệ.", traceId }, { status: 400 });
+          // If this is a test ping / verification from BankHub Console
+          if (!signRequestId || !nextState || !["COMPLETED", "REJECTED"].includes(nextState)) {
+            console.info("[esign.webhook] received verification ping / unhandled payload", {
+              traceId,
+              payloadSnippet: sanitizeLogText(rawText),
+            });
+            return Response.json({
+              ok: true,
+              message: "Webhook ping acknowledged",
+              traceId,
+            });
           }
 
           const statusToStore: StoredSignStatus = {
@@ -430,8 +464,8 @@ const worker = {
           return Response.json({ ok: true, traceId });
         } catch (error) {
           const message = error instanceof Error ? error.message : "Không thể xử lý webhook.";
-          console.error("[esign.webhook] invalid request exception", { traceId, message: sanitizeLogText(message) });
-          return Response.json({ message: "Payload webhook không hợp lệ.", traceId }, { status: 400 });
+          console.error("[esign.webhook] processing error", { traceId, message: sanitizeLogText(message) });
+          return Response.json({ ok: true, message: "Webhook acknowledged", traceId });
         }
       }
 
