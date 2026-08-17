@@ -208,7 +208,7 @@ const fetchAndCacheSignedPdf = async (env: Env, identityKey: string): Promise<Re
       console.warn("[esign.download] missing credentials", { identityKey });
       return Response.json({ message: "Máy chủ chưa được cấu hình thông tin kết nối API ký số." }, { status: 500 });
     }
-    const apiBase = (env.ESIGN_API_URL || "https://sandbox.bankhub.dev/esign/push-request-document")
+    const apiBase = (env.ESIGN_API_URL || "https://production.bankhub.dev/esign/push-request-document")
       .replace(/\/(push-request-document|download-file|request-status)\/?$/, "");
 
     console.info("[esign.download] calling BankHub download-file API", {
@@ -307,7 +307,7 @@ const worker = {
       }
       try {
         const formData = await request.formData();
-        const upstreamUrl = env.ESIGN_API_URL || "https://sandbox.bankhub.dev/esign/push-request-document";
+        const upstreamUrl = env.ESIGN_API_URL || "https://production.bankhub.dev/esign/push-request-document";
         const uploadedFile = formData.get("file");
         const signatureFieldsValue = formData.get("signatureFields");
         const documentNameValue = formData.get("documentName");
@@ -451,7 +451,7 @@ const worker = {
         if (!env.ESIGN_CLIENT_ID || !env.ESIGN_SECRET_KEY) {
           return Response.json({ message: "Máy chủ chưa được cấu hình thông tin kết nối API ký số." }, { status: 500 });
         }
-        const apiBase = (env.ESIGN_API_URL || "https://sandbox.bankhub.dev/esign/push-request-document")
+        const apiBase = (env.ESIGN_API_URL || "https://production.bankhub.dev/esign/push-request-document")
           .replace(/\/(push-request-document|download-file|request-status)\/?$/, "");
         const upstream = await fetch(`${apiBase}/request-status`, {
           method: "POST",

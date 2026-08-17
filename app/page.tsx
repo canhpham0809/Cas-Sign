@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertCircle,
   CheckCircle2,
   ChevronDown,
   Clock3,
@@ -14,6 +15,7 @@ import {
   Send,
   UploadCloud,
   X,
+  XCircle,
 } from "lucide-react";
 
 type SignatureField = {
@@ -63,6 +65,69 @@ const normalizeDocumentName = (value: string): string => value
   .replace(/[\u0000-\u001F\u007F]/g, " ")
   .replace(/\s+/g, " ")
   .trim();
+
+const parseResponseErrorMessage = async (response: Response, fallbackMessage: string): Promise<string> => {
+  let traceId = response.headers.get("x-cas-trace-id") || "";
+  let extractedMsg = "";
+
+  try {
+    const text = await response.text();
+    if (text) {
+      try {
+        const json = JSON.parse(text);
+        if (json && typeof json === "object") {
+          if (!traceId && json.traceId && typeof json.traceId === "string") {
+            traceId = json.traceId;
+          }
+
+          if (typeof json.message === "string" && json.message.trim()) {
+            extractedMsg = json.message.trim();
+          } else if (typeof json.error === "string" && json.error.trim()) {
+            extractedMsg = json.error.trim();
+          } else if (json.error && typeof json.error === "object") {
+            if (typeof json.error.message === "string" && json.error.message.trim()) {
+              extractedMsg = json.error.message.trim();
+            } else if (typeof json.error.description === "string" && json.error.description.trim()) {
+              extractedMsg = json.error.description.trim();
+            } else if (typeof json.error.detail === "string" && json.error.detail.trim()) {
+              extractedMsg = json.error.detail.trim();
+            }
+          } else if (Array.isArray(json.errors) && json.errors.length > 0) {
+            extractedMsg = json.errors
+              .map((err: any) => (typeof err === "string" ? err : err?.message || err?.detail || ""))
+              .filter(Boolean)
+              .join("; ");
+          } else if (typeof json.detail === "string" && json.detail.trim()) {
+            extractedMsg = json.detail.trim();
+          } else if (typeof json.description === "string" && json.description.trim()) {
+            extractedMsg = json.description.trim();
+          }
+        }
+      } catch {
+        if (text.length < 300 && !text.includes("<html") && !text.includes("<HTML")) {
+          extractedMsg = text.trim();
+        }
+      }
+    }
+  } catch {
+    // Reading body failed
+  }
+
+  if (!extractedMsg) {
+    if (response.status === 400) extractedMsg = "Dữ liệu yêu cầu không hợp lệ (HTTP 400).";
+    else if (response.status === 401) extractedMsg = "Không có quyền truy cập. Vui lòng kiểm tra lại thông tin xác thực (HTTP 401).";
+    else if (response.status === 403) extractedMsg = "Yêu cầu bị từ chối truy cập (HTTP 403).";
+    else if (response.status === 404) extractedMsg = "Không tìm thấy dữ liệu hoặc điểm cuối API (HTTP 404).";
+    else if (response.status === 413) extractedMsg = "Dung lượng dữ liệu gửi lên quá lớn (HTTP 413).";
+    else if (response.status === 502) extractedMsg = "Máy chủ ký số không phản hồi hoặc gián đoạn kết nối (HTTP 502).";
+    else if (response.status === 503) extractedMsg = "Dịch vụ ký số đang tạm thời bảo trì (HTTP 503).";
+    else if (response.status === 504) extractedMsg = "Kết nối tới máy chủ ký số quá thời gian phản hồi (HTTP 504).";
+    else if (response.status >= 500) extractedMsg = `${fallbackMessage} (Lỗi máy chủ HTTP ${response.status}).`;
+    else extractedMsg = fallbackMessage;
+  }
+
+  return traceId ? `${extractedMsg} · Trace: ${traceId}` : extractedMsg;
+};
 
 const defaultField = (page = 1, index = 0): SignatureField => ({
   id: crypto.randomUUID(),
@@ -330,7 +395,10 @@ export default function Home() {
       ? `identityKey=${encodeURIComponent(options.identityKey)}`
       : `url=${encodeURIComponent(options.url || "")}`;
     const response = await fetch(`/api/esign/signed-file?${query}`, { cache: "no-store" });
-    if (!response.ok) throw new Error("Không thể tải bản PDF đã ký để hiển thị.");
+    if (!response.ok) {
+      const errorMsg = await parseResponseErrorMessage(response, "Không thể tải bản PDF đã ký để hiển thị.");
+      throw new Error(errorMsg);
+    }
     const blob = await response.blob();
     const signedFile = new File([blob], `${signRequestId}-signed.pdf`, { type: "application/pdf" });
     const pdfjs = await import("pdfjs-dist");
@@ -349,8 +417,11 @@ export default function Home() {
     setCheckingStatus(true);
     try {
       const response = await fetch(`/api/esign/status/${encodeURIComponent(activeRequestId)}`, { cache: "no-store" });
-      const result = await response.json() as Record<string, any>;
-      if (!response.ok) throw new Error(result.message || result.error || "Không thể lấy trạng thái ký.");
+      if (!response.ok) {
+        const errorMsg = await parseResponseErrorMessage(response, "Không thể lấy trạng thái ký.");
+        throw new Error(errorMsg);
+      }
+      const result = (await response.json()) as Record<string, any>;
       const signStatus = result.signRequestStatus || (result.signRequestId || result.state ? result : result.data);
       const nextState = signStatus?.state?.toUpperCase();
       const targetKey = signStatus?.identityKey;
@@ -390,6 +461,7 @@ export default function Home() {
       setStatus("processing");
       setMessage(`Đang chờ ký${nextState ? ` · ${nextState}` : ""}. Chưa có callback Webhook mới.`);
     } catch (error) {
+      setStatus("error");
       setMessage(`${error instanceof Error ? error.message : "Chưa lấy được trạng thái."}`);
     } finally {
       setCheckingStatus(false);
@@ -537,11 +609,9 @@ export default function Home() {
       }))));
       body.append("file", file);
       const response = await fetch("/api/esign", { method: "POST", body });
-      const result = (await response.json().catch(() => ({}))) as Record<string, any>;
       if (!response.ok) {
-        const traceId = response.headers.get("x-cas-trace-id") || result?.traceId;
-        const baseMessage = result?.message || result?.error || "Dịch vụ ký số chưa phản hồi thành công.";
-        throw new Error(traceId ? `${baseMessage} · Trace: ${traceId}` : baseMessage);
+        const errorMsg = await parseResponseErrorMessage(response, "Dịch vụ ký số chưa phản hồi thành công.");
+        throw new Error(errorMsg);
       }
       setStatus("sent");
       setMessage("Hồ sơ đã gửi thành công. Vui lòng thực hiện ký trên Cas ID.");
@@ -613,7 +683,20 @@ export default function Home() {
           )}
 
           <div className="submit-area">
-            {message && <div className={`notice ${status}`}><CheckCircle2 size={17} /> <span>{message}</span></div>}
+            {message && (
+              <div className={`notice ${status}`}>
+                {status === "completed" || status === "sent" ? (
+                  <CheckCircle2 size={17} />
+                ) : status === "processing" ? (
+                  <LoaderCircle className="spin" size={17} />
+                ) : status === "rejected" ? (
+                  <XCircle size={17} />
+                ) : (
+                  <AlertCircle size={17} />
+                )}
+                <span>{message}</span>
+              </div>
+            )}
             {["sent", "processing"].includes(status) && activeRequestId && !isReplacingSignedFile && (
               <div className="poll-controls">
                 <button type="button" disabled={checkingStatus} onClick={checkStatusNow}>

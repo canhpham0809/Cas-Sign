@@ -88,7 +88,9 @@ input.invalid { border-color:#d56656; background:#fff9f7; box-shadow:0 0 0 3px #
 .notice.sent { background:var(--green-soft); color:var(--green); }
 .notice.completed { background:var(--green-soft); color:var(--green); }
 .notice.processing { background:#fff8e8; color:#805c17; }
-.notice svg { flex:0 0 auto; }
+.notice.rejected { background:#fff0f0; color:#c53030; border:1px solid #fecaca; }
+.notice.error { background:#fff1ee; color:#9f3f31; border:1px solid #fca5a5; }
+.notice svg { flex:0 0 auto; margin-top:1px; }
 .poll-controls { margin-bottom:9px; padding:9px; border:1px solid #ead49f; border-radius:8px; background:#fffaf0; display:grid; gap:7px; }
 .poll-controls > span { display:flex; align-items:center; justify-content:center; gap:5px; color:#785716; font-size:9px; font-weight:700; }
 .poll-controls button { height:32px; border:1px solid #d8bd7e; border-radius:7px; background:#fff; color:#765513; display:flex; align-items:center; justify-content:center; gap:6px; font-size:9px; font-weight:800; }

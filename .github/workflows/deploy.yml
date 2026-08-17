@@ -24,6 +24,7 @@ jobs:
       ESIGN_CLIENT_ID: ${{ secrets.ESIGN_CLIENT_ID }}
       ESIGN_SECRET_KEY: ${{ secrets.ESIGN_SECRET_KEY }}
       ESIGN_WEBHOOK_SECRET: ${{ secrets.ESIGN_WEBHOOK_SECRET }}
+      ESIGN_API_URL: ${{ secrets.ESIGN_API_URL || 'https://production.bankhub.dev/esign/push-request-document' }}
 
     steps:
       - name: Checkout source
@@ -45,11 +46,12 @@ jobs:
           ESIGN_CLIENT_ID: ""
           ESIGN_SECRET_KEY: ""
           ESIGN_WEBHOOK_SECRET: ""
+          ESIGN_API_URL: ""
 
       - name: Deploy Worker
         run: npx wrangler deploy --config dist/server/wrangler.json --name cas-sign
 
       - name: Update encrypted eSign secrets
         run: |
-          jq -n '{ESIGN_CLIENT_ID: env.ESIGN_CLIENT_ID, ESIGN_SECRET_KEY: env.ESIGN_SECRET_KEY, ESIGN_WEBHOOK_SECRET: env.ESIGN_WEBHOOK_SECRET}' \
+          jq -n '{ESIGN_CLIENT_ID: env.ESIGN_CLIENT_ID, ESIGN_SECRET_KEY: env.ESIGN_SECRET_KEY, ESIGN_WEBHOOK_SECRET: env.ESIGN_WEBHOOK_SECRET, ESIGN_API_URL: env.ESIGN_API_URL}' \
             | npx wrangler secret bulk --config dist/server/wrangler.json --name cas-sign
