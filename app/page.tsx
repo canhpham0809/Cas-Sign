@@ -52,7 +52,7 @@ type SignStatusResponse = {
 const initialForm: FormState = {
   identificationNumber: "",
   documentName: "",
-  organizationName: "",
+  organizationName: "Cas Sign",
   taxCode: "",
 };
 
@@ -78,29 +78,53 @@ const parseResponseErrorMessage = async (response: Response, fallbackMessage: st
         if (json && typeof json === "object") {
           if (!traceId && json.traceId && typeof json.traceId === "string") {
             traceId = json.traceId;
+          } else if (!traceId && json.requestId && typeof json.requestId === "string") {
+            traceId = json.requestId;
+          } else if (!traceId && json.request_id && typeof json.request_id === "string") {
+            traceId = json.request_id;
           }
 
-          if (typeof json.message === "string" && json.message.trim()) {
+          if (typeof json.errorMessage === "string" && json.errorMessage.trim()) {
+            extractedMsg = json.errorMessage.trim();
+          } else if (typeof json.error_message === "string" && json.error_message.trim()) {
+            extractedMsg = json.error_message.trim();
+          } else if (typeof json.message === "string" && json.message.trim()) {
             extractedMsg = json.message.trim();
           } else if (typeof json.error === "string" && json.error.trim()) {
             extractedMsg = json.error.trim();
           } else if (json.error && typeof json.error === "object") {
-            if (typeof json.error.message === "string" && json.error.message.trim()) {
+            if (typeof json.error.errorMessage === "string" && json.error.errorMessage.trim()) {
+              extractedMsg = json.error.errorMessage.trim();
+            } else if (typeof json.error.error_message === "string" && json.error.error_message.trim()) {
+              extractedMsg = json.error.error_message.trim();
+            } else if (typeof json.error.message === "string" && json.error.message.trim()) {
               extractedMsg = json.error.message.trim();
             } else if (typeof json.error.description === "string" && json.error.description.trim()) {
               extractedMsg = json.error.description.trim();
             } else if (typeof json.error.detail === "string" && json.error.detail.trim()) {
               extractedMsg = json.error.detail.trim();
             }
+          } else if (json.data && typeof json.data === "object") {
+            if (typeof json.data.errorMessage === "string" && json.data.errorMessage.trim()) {
+              extractedMsg = json.data.errorMessage.trim();
+            } else if (typeof json.data.error_message === "string" && json.data.error_message.trim()) {
+              extractedMsg = json.data.error_message.trim();
+            } else if (typeof json.data.message === "string" && json.data.message.trim()) {
+              extractedMsg = json.data.message.trim();
+            }
           } else if (Array.isArray(json.errors) && json.errors.length > 0) {
             extractedMsg = json.errors
-              .map((err: any) => (typeof err === "string" ? err : err?.message || err?.detail || ""))
+              .map((err: any) => (typeof err === "string" ? err : err?.errorMessage || err?.error_message || err?.message || err?.detail || err?.description || ""))
               .filter(Boolean)
               .join("; ");
           } else if (typeof json.detail === "string" && json.detail.trim()) {
             extractedMsg = json.detail.trim();
           } else if (typeof json.description === "string" && json.description.trim()) {
             extractedMsg = json.description.trim();
+          } else if (typeof json.errorDescription === "string" && json.errorDescription.trim()) {
+            extractedMsg = json.errorDescription.trim();
+          } else if (typeof json.error_description === "string" && json.error_description.trim()) {
+            extractedMsg = json.error_description.trim();
           }
         }
       } catch {
@@ -113,18 +137,20 @@ const parseResponseErrorMessage = async (response: Response, fallbackMessage: st
     // Reading body failed
   }
 
-  if (!extractedMsg) {
-    if (response.status === 400) extractedMsg = "Dữ liệu yêu cầu không hợp lệ (HTTP 400).";
-    else if (response.status === 401) extractedMsg = "Không có quyền truy cập. Vui lòng kiểm tra lại thông tin xác thực (HTTP 401).";
-    else if (response.status === 403) extractedMsg = "Yêu cầu bị từ chối truy cập (HTTP 403).";
-    else if (response.status === 404) extractedMsg = "Không tìm thấy dữ liệu hoặc điểm cuối API (HTTP 404).";
-    else if (response.status === 413) extractedMsg = "Dung lượng dữ liệu gửi lên quá lớn (HTTP 413).";
-    else if (response.status === 502) extractedMsg = "Máy chủ ký số không phản hồi hoặc gián đoạn kết nối (HTTP 502).";
-    else if (response.status === 503) extractedMsg = "Dịch vụ ký số đang tạm thời bảo trì (HTTP 503).";
-    else if (response.status === 504) extractedMsg = "Kết nối tới máy chủ ký số quá thời gian phản hồi (HTTP 504).";
-    else if (response.status >= 500) extractedMsg = `${fallbackMessage} (Lỗi máy chủ HTTP ${response.status}).`;
-    else extractedMsg = fallbackMessage;
+  if (extractedMsg) {
+    return extractedMsg;
   }
+
+  if (response.status === 400) extractedMsg = "Dữ liệu yêu cầu không hợp lệ (HTTP 400).";
+  else if (response.status === 401) extractedMsg = "Không có quyền truy cập. Vui lòng kiểm tra lại thông tin xác thực (HTTP 401).";
+  else if (response.status === 403) extractedMsg = "Yêu cầu bị từ chối truy cập (HTTP 403).";
+  else if (response.status === 404) extractedMsg = "Không tìm thấy dữ liệu hoặc điểm cuối API (HTTP 404).";
+  else if (response.status === 413) extractedMsg = "Dung lượng dữ liệu gửi lên quá lớn (HTTP 413).";
+  else if (response.status === 502) extractedMsg = "Máy chủ ký số không phản hồi hoặc gián đoạn kết nối (HTTP 502).";
+  else if (response.status === 503) extractedMsg = "Dịch vụ ký số đang tạm thời bảo trì (HTTP 503).";
+  else if (response.status === 504) extractedMsg = "Kết nối tới máy chủ ký số quá thời gian phản hồi (HTTP 504).";
+  else if (response.status >= 500) extractedMsg = `${fallbackMessage} (Lỗi máy chủ HTTP ${response.status}).`;
+  else extractedMsg = fallbackMessage;
 
   return traceId ? `${extractedMsg} · Trace: ${traceId}` : extractedMsg;
 };
@@ -650,7 +676,7 @@ export default function Home() {
             {touched.identificationNumber && validationErrors.identificationNumber && <small className="field-error wide-field">{validationErrors.identificationNumber}</small>}
             <label className="wide-field"><span>Tên tài liệu <em>*</em></span><input maxLength={200} disabled={!file || isFileLocked || isSignedPreview} className={touched.documentName && validationErrors.documentName ? "invalid" : ""} value={form.documentName} onBlur={() => { touchField("documentName"); setValue("documentName", normalizeDocumentName(form.documentName)); }} onChange={(e) => setValue("documentName", e.target.value)} placeholder={file ? "Nhập tên tài liệu" : "Upload PDF để nhập tên tài liệu"} /></label>
             {touched.documentName && validationErrors.documentName && <small className="field-error wide-field">{validationErrors.documentName}</small>}
-            <label className="wide-field"><span>Gửi từ <em>*</em></span><input className={touched.organizationName && validationErrors.organizationName ? "invalid" : ""} value={form.organizationName} onBlur={() => touchField("organizationName")} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Công ty TNHH..." /></label>
+            <label className="wide-field"><span>Gửi từ <em>*</em></span><input className={touched.organizationName && validationErrors.organizationName ? "invalid" : ""} value={form.organizationName} onBlur={() => touchField("organizationName")} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Cas Sign" /></label>
             {touched.organizationName && validationErrors.organizationName && <small className="field-error wide-field">{validationErrors.organizationName}</small>}
             <label className="business-toggle wide-field"><input type="checkbox" checked={isBusinessSigning} onChange={(e) => { setIsBusinessSigning(e.target.checked); if (!e.target.checked) setTouched((prev) => ({ ...prev, taxCode: false })); }} /><span><strong>Ký doanh nghiệp</strong><small>Yêu cầu mã số thuế</small></span></label>
             {isBusinessSigning && <label className="wide-field tax-field"><span>Mã số thuế <em>*</em></span><input className={touched.taxCode && validationErrors.taxCode ? "invalid" : ""} value={form.taxCode} onBlur={() => touchField("taxCode")} onChange={(e) => setValue("taxCode", e.target.value)} placeholder="0123456789 hoặc 0123456789-001" inputMode="numeric" /></label>}
