@@ -66,6 +66,21 @@ const normalizeDocumentName = (value: string): string => value
   .replace(/\s+/g, " ")
   .trim();
 
+const formatSignedFileName = (rawFileName: string): string => {
+  if (!rawFileName || !rawFileName.trim()) return "cas_sign_signed.pdf";
+  const baseName = rawFileName.replace(/\.pdf$/i, "").trim();
+  let converted = baseName
+    .replace(/[đĐ]/g, (match) => (match === "Đ" ? "D" : "d"))
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  converted = converted
+    .replace(/[^a-zA-Z0-9_]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (!converted) converted = "document";
+  return `${converted}_signed.pdf`;
+};
+
 const parseResponseErrorMessage = async (response: Response, fallbackMessage: string): Promise<string> => {
   let traceId = response.headers.get("x-cas-trace-id") || "";
   let extractedMsg = "";
@@ -294,6 +309,7 @@ export default function Home() {
   const [activeRequestId, setActiveRequestId] = useState("");
   const [isBusinessSigning, setIsBusinessSigning] = useState(false);
   const [touched, setTouched] = useState<Partial<Record<keyof FormState, boolean>>>({});
+  const [originalFileName, setOriginalFileName] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [pdf, setPdf] = useState<any>(null);
   const [pageCount, setPageCount] = useState(0);
@@ -426,7 +442,8 @@ export default function Home() {
       throw new Error(errorMsg);
     }
     const blob = await response.blob();
-    const signedFile = new File([blob], `${signRequestId}-signed.pdf`, { type: "application/pdf" });
+    const downloadName = formatSignedFileName(originalFileName || file?.name || form.documentName || signRequestId);
+    const signedFile = new File([blob], downloadName, { type: "application/pdf" });
     const pdfjs = await import("pdfjs-dist");
     pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
     const loaded = await pdfjs.getDocument({ data: await signedFile.arrayBuffer() }).promise;
@@ -519,6 +536,7 @@ export default function Home() {
       pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
       const data = await nextFile.arrayBuffer();
       const loaded = await pdfjs.getDocument({ data }).promise;
+      setOriginalFileName(nextFile.name);
       setFile(nextFile);
       setPdf(loaded);
       setPageCount(loaded.numPages);
@@ -559,6 +577,7 @@ export default function Home() {
   const createNewRequest = () => {
     pollingIdRef.current = null;
     clearPollSchedule();
+    setOriginalFileName("");
     setFile(null);
     setPdf(null);
     setPageCount(0);
@@ -584,7 +603,7 @@ export default function Home() {
     const objectUrl = URL.createObjectURL(file);
     const anchor = document.createElement("a");
     anchor.href = objectUrl;
-    anchor.download = file.name || `${activeRequestId || "cas-sign"}-signed.pdf`;
+    anchor.download = formatSignedFileName(originalFileName || file.name || form.documentName || activeRequestId || "document");
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -697,7 +716,7 @@ export default function Home() {
             <div className="file-card">
               <div className="file-icon"><FileText size={20} /></div>
               <div className="file-info"><strong>{file.name}</strong><span>{(file.size / 1024 / 1024).toFixed(2)} MB · {pageCount} trang</span></div>
-              <button type="button" disabled={isFileLocked} onClick={() => { setFile(null); setPdf(null); setFields([]); setPageCount(0); setIsSignedPreview(false); setSignedAt(""); }} aria-label="Bỏ file"><X size={17} /></button>
+              <button type="button" disabled={isFileLocked} onClick={() => { setFile(null); setPdf(null); setFields([]); setPageCount(0); setIsSignedPreview(false); setSignedAt(""); setOriginalFileName(""); }} aria-label="Bỏ file"><X size={17} /></button>
             </div>
           )}
 
