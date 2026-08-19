@@ -338,6 +338,7 @@ export default function Home() {
     if (!form.organizationName.trim()) errors.organizationName = "Vui lòng nhập Gửi từ yêu cầu.";
     const documentName = normalizeDocumentName(form.documentName);
     if (!documentName) errors.documentName = "Vui lòng nhập tên tài liệu.";
+    else if (documentName.length < 10) errors.documentName = "Tên tài liệu phải từ 10 ký tự trở lên.";
     else if (documentName.length > 200) errors.documentName = "Tên tài liệu không được vượt quá 200 ký tự.";
     if (isBusinessSigning) {
       const taxCode = form.taxCode.trim();
@@ -546,7 +547,7 @@ export default function Home() {
       setSelectedId(first.id);
       setTargetPage(1);
       setForm((prev) => ({ ...prev, documentName: nextFile.name.replace(/\.pdf$/i, "") }));
-      setTouched((prev) => ({ ...prev, documentName: false }));
+      setTouched((prev) => ({ ...prev, documentName: true }));
     } catch {
       setStatus("error");
       setMessage("Không thể đọc file PDF này. Vui lòng thử một file khác.");
@@ -693,7 +694,7 @@ export default function Home() {
           <div className="fields-grid">
             <label className="wide-field"><span>CCCD <em>*</em></span><input className={touched.identificationNumber && validationErrors.identificationNumber ? "invalid" : ""} value={form.identificationNumber} onBlur={() => touchField("identificationNumber")} onChange={(e) => setValue("identificationNumber", e.target.value)} placeholder="CCCD / CMND" /></label>
             {touched.identificationNumber && validationErrors.identificationNumber && <small className="field-error wide-field">{validationErrors.identificationNumber}</small>}
-            <label className="wide-field"><span>Tên tài liệu <em>*</em></span><input maxLength={200} disabled={!file || isFileLocked || isSignedPreview} className={touched.documentName && validationErrors.documentName ? "invalid" : ""} value={form.documentName} onBlur={() => { touchField("documentName"); setValue("documentName", normalizeDocumentName(form.documentName)); }} onChange={(e) => setValue("documentName", e.target.value)} placeholder={file ? "Nhập tên tài liệu" : "Upload PDF để nhập tên tài liệu"} /></label>
+            <label className="wide-field"><span>Tên tài liệu <em>*</em> <span className="optional-label">Tối thiểu 10 ký tự</span></span><input maxLength={200} disabled={!file || isFileLocked || isSignedPreview} className={touched.documentName && validationErrors.documentName ? "invalid" : ""} value={form.documentName} onBlur={() => { touchField("documentName"); setValue("documentName", normalizeDocumentName(form.documentName)); }} onChange={(e) => setValue("documentName", e.target.value)} placeholder={file ? "Nhập tên tài liệu (tối thiểu 10 ký tự)" : "Upload PDF để nhập tên tài liệu"} /></label>
             {touched.documentName && validationErrors.documentName && <small className="field-error wide-field">{validationErrors.documentName}</small>}
             <label className="wide-field"><span>Gửi từ <em>*</em></span><input className={touched.organizationName && validationErrors.organizationName ? "invalid" : ""} value={form.organizationName} onBlur={() => touchField("organizationName")} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Cas Sign" /></label>
             {touched.organizationName && validationErrors.organizationName && <small className="field-error wide-field">{validationErrors.organizationName}</small>}
