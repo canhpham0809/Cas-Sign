@@ -24,7 +24,7 @@ jobs:
       ESIGN_CLIENT_ID: ${{ secrets.ESIGN_CLIENT_ID }}
       ESIGN_SECRET_KEY: ${{ secrets.ESIGN_SECRET_KEY }}
       ESIGN_WEBHOOK_SECRET: ${{ secrets.ESIGN_WEBHOOK_SECRET }}
-      ESIGN_API_URL: ${{ secrets.ESIGN_API_URL || 'https://production.bankhub.dev/esign/push-request-document' }}
+      ESIGN_API_URL: ${{ secrets.ESIGN_API_URL || 'https://production.bankhub.dev/esign/request-document' }}
 
     steps:
       - name: Checkout source

@@ -620,9 +620,8 @@ export default function Home() {
       setPdf(loaded as unknown as PdfDocumentProxy);
       setPageCount(loaded.numPages);
       setIsSignedPreview(false);
-      const first = defaultField(1);
-      setFields([first]);
-      setSelectedId(first.id);
+      setFields([]);
+      setSelectedId(null);
       setTargetPage(1);
       const nextForm = { ...form, documentName: nextFile.name.replace(/\.pdf$/i, "") };
       setForm(nextForm);
@@ -634,7 +633,7 @@ export default function Home() {
         isSignedPreview: false,
         status: "draft",
         form: nextForm,
-        fields: [first],
+        fields: [],
       });
     } catch {
       setStatus("error");
