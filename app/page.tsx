@@ -1,22 +1,28 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import QRCode from "qrcode";
 import {
   AlertCircle,
   CheckCircle2,
   ChevronDown,
-  Clock3,
+  Copy,
   Download,
+  FileSignature,
   FileText,
   GripVertical,
   LoaderCircle,
   Plus,
+  QrCode,
   RefreshCw,
   Send,
+  ShieldCheck,
   UploadCloud,
   X,
   XCircle,
 } from "lucide-react";
+import { clearSessionState, loadSessionState, saveSessionState } from "./session-storage";
 
 type SignatureField = {
   id: string;
@@ -35,20 +41,6 @@ type FormState = {
   taxCode: string;
 };
 
-type SignStatusResponse = {
-  signRequestStatus?: {
-    signRequestId?: string;
-    state?: string;
-    lastUpdatedAt?: string;
-    signedAt?: string;
-    signedFileUrl?: string;
-    identityKey?: string;
-    identityKeyExpiresAt?: string;
-    expiresIn?: number;
-    rejectedReason?: string;
-  };
-};
-
 const initialForm: FormState = {
   identificationNumber: "",
   documentName: "",
@@ -58,8 +50,6 @@ const initialForm: FormState = {
 
 const createSignRequestId = (): string =>
   `CAS-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
-
-const MAX_AUTO_STATUS_CHECKS = 20;
 
 const normalizeDocumentName = (value: string): string => value
   .replace(/[\u0000-\u001F\u007F]/g, " ")
@@ -114,32 +104,7 @@ const parseResponseErrorMessage = async (response: Response, fallbackMessage: st
               extractedMsg = json.error.error_message.trim();
             } else if (typeof json.error.message === "string" && json.error.message.trim()) {
               extractedMsg = json.error.message.trim();
-            } else if (typeof json.error.description === "string" && json.error.description.trim()) {
-              extractedMsg = json.error.description.trim();
-            } else if (typeof json.error.detail === "string" && json.error.detail.trim()) {
-              extractedMsg = json.error.detail.trim();
             }
-          } else if (json.data && typeof json.data === "object") {
-            if (typeof json.data.errorMessage === "string" && json.data.errorMessage.trim()) {
-              extractedMsg = json.data.errorMessage.trim();
-            } else if (typeof json.data.error_message === "string" && json.data.error_message.trim()) {
-              extractedMsg = json.data.error_message.trim();
-            } else if (typeof json.data.message === "string" && json.data.message.trim()) {
-              extractedMsg = json.data.message.trim();
-            }
-          } else if (Array.isArray(json.errors) && json.errors.length > 0) {
-            extractedMsg = json.errors
-              .map((err: any) => (typeof err === "string" ? err : err?.errorMessage || err?.error_message || err?.message || err?.detail || err?.description || ""))
-              .filter(Boolean)
-              .join("; ");
-          } else if (typeof json.detail === "string" && json.detail.trim()) {
-            extractedMsg = json.detail.trim();
-          } else if (typeof json.description === "string" && json.description.trim()) {
-            extractedMsg = json.description.trim();
-          } else if (typeof json.errorDescription === "string" && json.errorDescription.trim()) {
-            extractedMsg = json.errorDescription.trim();
-          } else if (typeof json.error_description === "string" && json.error_description.trim()) {
-            extractedMsg = json.error_description.trim();
           }
         }
       } catch {
@@ -152,10 +117,7 @@ const parseResponseErrorMessage = async (response: Response, fallbackMessage: st
     // Reading body failed
   }
 
-  if (extractedMsg) {
-    return extractedMsg;
-  }
-
+  if (extractedMsg) return extractedMsg;
   if (response.status === 400) extractedMsg = "Dữ liệu yêu cầu không hợp lệ (HTTP 400).";
   else if (response.status === 401) extractedMsg = "Không có quyền truy cập. Vui lòng kiểm tra lại thông tin xác thực (HTTP 401).";
   else if (response.status === 403) extractedMsg = "Yêu cầu bị từ chối truy cập (HTTP 403).";
@@ -180,8 +142,20 @@ const defaultField = (page = 1, index = 0): SignatureField => ({
   fieldType: "SIGNATURE",
 });
 
+type PdfDocumentProxy = {
+  numPages: number;
+  getPage: (pageNumber: number) => Promise<{
+    getViewport: (options: { scale: number }) => { width: number; height: number };
+    render: (options: {
+      canvasContext: CanvasRenderingContext2D;
+      viewport: { width: number; height: number };
+      transform?: number[];
+    }) => { promise: Promise<void>; cancel?: () => void };
+  }>;
+};
+
 function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove, onResize, onDelete }: {
-  pdf: any;
+  pdf: PdfDocumentProxy;
   pageNumber: number;
   fields: SignatureField[];
   selectedId: string | null;
@@ -196,7 +170,7 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, locked, onSelect, onMove
 
   useEffect(() => {
     let cancelled = false;
-    let renderTask: any;
+    let renderTask: { promise: Promise<void>; cancel?: () => void } | undefined;
     (async () => {
       const page = await pdf.getPage(pageNumber);
       if (cancelled || !canvasRef.current) return;
@@ -300,18 +274,14 @@ export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const documentScrollRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
-  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pollingIdRef = useRef<string | null>(null);
-  const autoPollAttemptsRef = useRef(0);
-  const autoPollingStoppedRef = useRef(false);
+
   const [form, setForm] = useState(initialForm);
   const [activeRequestId, setActiveRequestId] = useState("");
   const [isBusinessSigning, setIsBusinessSigning] = useState(false);
   const [touched, setTouched] = useState<Partial<Record<keyof FormState, boolean>>>({});
   const [originalFileName, setOriginalFileName] = useState("");
   const [file, setFile] = useState<File | null>(null);
-  const [pdf, setPdf] = useState<any>(null);
+  const [pdf, setPdf] = useState<PdfDocumentProxy | null>(null);
   const [pageCount, setPageCount] = useState(0);
   const [fields, setFields] = useState<SignatureField[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -322,19 +292,22 @@ export default function Home() {
   const [message, setMessage] = useState("");
   const [signedAt, setSignedAt] = useState("");
   const [isSignedPreview, setIsSignedPreview] = useState(false);
-  const [countdown, setCountdown] = useState(0);
   const [checkingStatus, setCheckingStatus] = useState(false);
   const [isReplacingSignedFile, setIsReplacingSignedFile] = useState(false);
-  const [pollAttempt, setPollAttempt] = useState(0);
-  const [autoPollingStopped, setAutoPollingStopped] = useState(false);
+
+  // QR Code Modal States
+  const [qrUrl, setQrUrl] = useState("");
+  const [qrContent, setQrContent] = useState("");
+  const [signToken, setSignToken] = useState("");
+  const [showQrModal, setShowQrModal] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
 
   const selected = useMemo(() => fields.find((item) => item.id === selectedId), [fields, selectedId]);
   const isFileLocked = status === "sent" || status === "processing" || status === "rejected" || submitting;
+
+  // Validation: CCCD is optional now!
   const validationErrors = useMemo(() => {
     const errors: Partial<Record<keyof FormState | "file" | "fields", string>> = {};
-    const identification = form.identificationNumber.trim();
-    if (!identification) errors.identificationNumber = "Vui lòng nhập CCCD.";
-    else if (identification.length < 6) errors.identificationNumber = "CCCD cần ít nhất 6 ký tự.";
     if (!form.organizationName.trim()) errors.organizationName = "Vui lòng nhập Gửi từ yêu cầu.";
     const documentName = normalizeDocumentName(form.documentName);
     if (!documentName) errors.documentName = "Vui lòng nhập tên tài liệu.";
@@ -350,25 +323,42 @@ export default function Home() {
     if (fields.length === 0) errors.fields = "Cần đặt ít nhất một vùng ký.";
     return errors;
   }, [fields.length, file, form, isBusinessSigning]);
+
   const canSubmit = Object.keys(validationErrors).length === 0 && !isFileLocked;
   const validationHint = Object.values(validationErrors)[0];
 
-  useEffect(() => () => {
-    pollingIdRef.current = null;
-    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
-    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
+  const replaceWithSignedPdf = async (options: { identityKey?: string; url?: string }, signRequestId: string) => {
+    const query = options.identityKey
+      ? `identityKey=${encodeURIComponent(options.identityKey)}`
+      : `url=${encodeURIComponent(options.url || "")}`;
+    const response = await fetch(`/api/esign/signed-file?${query}`, { cache: "no-store" });
+    if (!response.ok) {
+      const errorMsg = await parseResponseErrorMessage(response, "Không thể tải bản PDF đã ký để hiển thị.");
+      throw new Error(errorMsg);
     }
-  }, []);
+    const blob = await response.blob();
+    const downloadName = formatSignedFileName(originalFileName || file?.name || form.documentName || signRequestId);
+    const signedFile = new File([blob], downloadName, { type: "application/pdf" });
+    const buffer = await signedFile.arrayBuffer();
 
-  const clearPollSchedule = () => {
-    if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
-    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
-    pollTimerRef.current = null;
-    countdownTimerRef.current = null;
-    setCountdown(0);
+    const pdfjs = await import("pdfjs-dist");
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+    const loaded = await pdfjs.getDocument({ data: buffer.slice(0) }).promise;
+
+    setFile(signedFile);
+    setPdf(loaded as unknown as PdfDocumentProxy);
+    setPageCount(loaded.numPages);
+    setFields([]);
+    setSelectedId(null);
+    setIsSignedPreview(true);
+
+    await saveSessionState({
+      fileBuffer: buffer,
+      originalFileName: downloadName,
+      isSignedPreview: true,
+      fields: [],
+      status: "completed",
+    });
   };
 
   const listenForWebhookSSE = (signRequestId: string) => {
@@ -383,14 +373,16 @@ export default function Home() {
       es.onmessage = async (event) => {
         if (!event.data || event.data.trim() === ": ok" || event.data.trim() === "ok") return;
         try {
-          const signStatus = JSON.parse(event.data) as Record<string, any>;
-          const nextState = signStatus?.state?.toUpperCase();
+          const signStatus = JSON.parse(event.data) as Record<string, unknown>;
+          const nextState = typeof signStatus?.state === "string" ? signStatus.state.toUpperCase() : undefined;
+          const targetKey = typeof signStatus?.identityKey === "string" ? signStatus.identityKey : (typeof signStatus?.identity_key === "string" ? signStatus.identity_key : undefined);
+          const targetUrl = typeof signStatus?.signedFileUrl === "string" ? signStatus.signedFileUrl : (typeof signStatus?.signed_file_url === "string" ? signStatus.signed_file_url : undefined);
 
           if (nextState === "COMPLETED") {
             es.close();
             eventSourceRef.current = null;
-            const targetKey = signStatus?.identityKey || signStatus?.identity_key;
-            const targetUrl = signStatus?.signedFileUrl || signStatus?.signed_file_url;
+            const signedTimestamp = (signStatus.signedAt as string) || (signStatus.lastUpdatedAt as string) || new Date().toISOString();
+
             if (targetKey || targetUrl) {
               setIsReplacingSignedFile(true);
               setStatus("processing");
@@ -398,8 +390,14 @@ export default function Home() {
               try {
                 await replaceWithSignedPdf({ identityKey: targetKey, url: targetUrl }, signRequestId);
                 setStatus("completed");
-                setSignedAt(signStatus.signedAt || signStatus.lastUpdatedAt || new Date().toISOString());
+                setSignedAt(signedTimestamp);
                 setMessage("Tài liệu đã ký hoàn tất. Bản xem trước đã được cập nhật.");
+                await saveSessionState({
+                  status: "completed",
+                  signedAt: signedTimestamp,
+                  message: "Tài liệu đã ký hoàn tất. Bản xem trước đã được cập nhật.",
+                  isSignedPreview: true,
+                });
               } catch (error) {
                 setStatus("completed");
                 setMessage(error instanceof Error ? error.message : "Đã ký xong nhưng chưa thể hiển thị file đã ký.");
@@ -408,16 +406,34 @@ export default function Home() {
               }
             } else {
               setStatus("completed");
-              setSignedAt(signStatus.signedAt || signStatus.lastUpdatedAt || new Date().toISOString());
+              setSignedAt(signedTimestamp);
               setMessage("Tài liệu đã ký hoàn tất.");
+              await saveSessionState({
+                status: "completed",
+                signedAt: signedTimestamp,
+                message: "Tài liệu đã ký hoàn tất.",
+              });
             }
+
+            // Auto close QR modal on completion
+            setTimeout(() => {
+              setShowQrModal(false);
+            }, 1200);
           } else if (["REJECTED", "FAILED", "CANCELLED", "EXPIRED"].includes(nextState || "")) {
             es.close();
             eventSourceRef.current = null;
-            setStatus(nextState === "REJECTED" ? "rejected" : "error");
-            setMessage(nextState === "REJECTED"
+            const rejectMsg = nextState === "REJECTED"
               ? `Người ký đã từ chối yêu cầu ký.${signStatus?.rejectedReason ? ` Lý do: ${signStatus.rejectedReason}` : ""}`
-              : `Yêu cầu ký đã kết thúc với trạng thái ${nextState}.`);
+              : `Yêu cầu ký đã kết thúc với trạng thái ${nextState}.`;
+            setStatus(nextState === "REJECTED" ? "rejected" : "error");
+            setMessage(rejectMsg);
+            await saveSessionState({
+              status: nextState === "REJECTED" ? "rejected" : "error",
+              message: rejectMsg,
+            });
+            setTimeout(() => {
+              setShowQrModal(false);
+            }, 1500);
           }
         } catch (e) {
           console.error("SSE message parse error", e);
@@ -429,32 +445,63 @@ export default function Home() {
         if (eventSourceRef.current === es) eventSourceRef.current = null;
       };
     } catch {
-      // SSE connection error fallback
+      // SSE fallback
     }
   };
 
-  const replaceWithSignedPdf = async (options: { identityKey?: string; url?: string }, signRequestId: string) => {
-    const query = options.identityKey
-      ? `identityKey=${encodeURIComponent(options.identityKey)}`
-      : `url=${encodeURIComponent(options.url || "")}`;
-    const response = await fetch(`/api/esign/signed-file?${query}`, { cache: "no-store" });
-    if (!response.ok) {
-      const errorMsg = await parseResponseErrorMessage(response, "Không thể tải bản PDF đã ký để hiển thị.");
-      throw new Error(errorMsg);
-    }
-    const blob = await response.blob();
-    const downloadName = formatSignedFileName(originalFileName || file?.name || form.documentName || signRequestId);
-    const signedFile = new File([blob], downloadName, { type: "application/pdf" });
-    const pdfjs = await import("pdfjs-dist");
-    pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
-    const loaded = await pdfjs.getDocument({ data: await signedFile.arrayBuffer() }).promise;
-    setFile(signedFile);
-    setPdf(loaded);
-    setPageCount(loaded.numPages);
-    setFields([]);
-    setSelectedId(null);
-    setIsSignedPreview(true);
-  };
+  // Restore session from IndexedDB on mount
+  useEffect(() => {
+    let isCancelled = false;
+    (async () => {
+      try {
+        const saved = await loadSessionState();
+        if (!saved || isCancelled) return;
+
+        if (saved.form) setForm(saved.form);
+        if (saved.isBusinessSigning !== undefined) setIsBusinessSigning(saved.isBusinessSigning);
+        if (saved.originalFileName) setOriginalFileName(saved.originalFileName);
+        if (saved.activeRequestId) {
+          setActiveRequestId(saved.activeRequestId);
+          if (["sent", "processing"].includes(saved.status)) {
+            listenForWebhookSSE(saved.activeRequestId);
+          }
+        }
+        if (saved.status) setStatus(saved.status);
+        if (saved.message) setMessage(saved.message);
+        if (saved.signedAt) setSignedAt(saved.signedAt);
+        if (saved.isSignedPreview !== undefined) setIsSignedPreview(saved.isSignedPreview);
+        if (saved.fields) setFields(saved.fields);
+        if (saved.qrContent) setQrContent(saved.qrContent);
+        if (saved.signToken) setSignToken(saved.signToken);
+        if (saved.qrUrl) setQrUrl(saved.qrUrl);
+
+        if (saved.fileBuffer && saved.fileBuffer.byteLength > 0) {
+          setLoadingPdf(true);
+          const pdfjs = await import("pdfjs-dist");
+          pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+          const fileObj = new File([saved.fileBuffer], saved.originalFileName || "document.pdf", { type: "application/pdf" });
+          const loaded = await pdfjs.getDocument({ data: saved.fileBuffer.slice(0) }).promise;
+          if (!isCancelled) {
+            setFile(fileObj);
+            setPdf(loaded as unknown as PdfDocumentProxy);
+            setPageCount(loaded.numPages);
+          }
+        }
+      } catch (e) {
+        console.warn("Restore session error", e);
+      } finally {
+        if (!isCancelled) setLoadingPdf(false);
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+    };
+  }, []);
 
   const checkStatusNow = async () => {
     if (!activeRequestId || checkingStatus) return;
@@ -465,41 +512,61 @@ export default function Home() {
         const errorMsg = await parseResponseErrorMessage(response, "Không thể lấy trạng thái ký.");
         throw new Error(errorMsg);
       }
-      const result = (await response.json()) as Record<string, any>;
-      const signStatus = result.signRequestStatus || (result.signRequestId || result.state ? result : result.data);
-      const nextState = signStatus?.state?.toUpperCase();
-      const targetKey = signStatus?.identityKey;
-      const targetUrl = signStatus?.signedFileUrl;
+      const result = (await response.json()) as Record<string, unknown>;
+      const signStatus = (result.signRequestStatus || (result.signRequestId || result.state ? result : result.data)) as Record<string, unknown> | undefined;
+      const nextState = typeof signStatus?.state === "string" ? signStatus.state.toUpperCase() : undefined;
+      const targetKey = typeof signStatus?.identityKey === "string" ? signStatus.identityKey : undefined;
+      const targetUrl = typeof signStatus?.signedFileUrl === "string" ? signStatus.signedFileUrl : undefined;
+      const signedTimestamp = (signStatus?.signedAt as string) || (signStatus?.lastUpdatedAt as string) || new Date().toISOString();
 
       if (nextState === "COMPLETED" && (targetKey || targetUrl)) {
         setIsReplacingSignedFile(true);
         setStatus("processing");
         setMessage("Đã ký hoàn tất. Đang cập nhật bản PDF đã ký...");
         try {
-          await new Promise((resolve) => setTimeout(resolve, 500));
+          await new Promise((resolve) => setTimeout(resolve, 300));
           await replaceWithSignedPdf({ identityKey: targetKey, url: targetUrl }, activeRequestId);
           setStatus("completed");
-          setSignedAt(signStatus.signedAt || signStatus.lastUpdatedAt || "");
+          setSignedAt(signedTimestamp);
           setMessage("Tài liệu đã ký hoàn tất. Bản xem trước đã được cập nhật.");
+          await saveSessionState({
+            status: "completed",
+            signedAt: signedTimestamp,
+            message: "Tài liệu đã ký hoàn tất. Bản xem trước đã được cập nhật.",
+            isSignedPreview: true,
+          });
         } catch (error) {
           setStatus("completed");
           setMessage(error instanceof Error ? error.message : "Đã ký xong nhưng chưa thể hiển thị file đã ký.");
         } finally {
           setIsReplacingSignedFile(false);
         }
+        setTimeout(() => setShowQrModal(false), 1200);
         return;
       }
       if (nextState === "COMPLETED") {
         setStatus("completed");
-        setSignedAt(signStatus?.signedAt || signStatus?.lastUpdatedAt || "");
+        setSignedAt(signedTimestamp);
         setMessage("Tài liệu đã ký hoàn tất.");
+        await saveSessionState({
+          status: "completed",
+          signedAt: signedTimestamp,
+          message: "Tài liệu đã ký hoàn tất.",
+        });
+        setTimeout(() => setShowQrModal(false), 1200);
         return;
       }
       if (["REJECTED", "FAILED", "CANCELLED", "EXPIRED"].includes(nextState || "")) {
-        setStatus(nextState === "REJECTED" ? "rejected" : "error");
-        setMessage(nextState === "REJECTED"
+        const rejectMsg = nextState === "REJECTED"
           ? `Người ký đã từ chối yêu cầu ký.${signStatus?.rejectedReason ? ` Lý do: ${signStatus.rejectedReason}` : ""}`
-          : `Yêu cầu ký đã kết thúc với trạng thái ${nextState}.`);
+          : `Yêu cầu ký đã kết thúc với trạng thái ${nextState}.`;
+        setStatus(nextState === "REJECTED" ? "rejected" : "error");
+        setMessage(rejectMsg);
+        await saveSessionState({
+          status: nextState === "REJECTED" ? "rejected" : "error",
+          message: rejectMsg,
+        });
+        setTimeout(() => setShowQrModal(false), 1500);
         return;
       }
       setStatus("processing");
@@ -512,8 +579,19 @@ export default function Home() {
     }
   };
 
+  const copyQrLink = () => {
+    if (!qrContent) return;
+    navigator.clipboard.writeText(qrContent);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
+  };
+
   const setValue = (key: keyof FormState, value: string) => {
-    setForm((prev) => ({ ...prev, [key]: value }));
+    setForm((prev) => {
+      const next = { ...prev, [key]: value };
+      saveSessionState({ form: next });
+      return next;
+    });
     if (!["sent", "processing", "completed", "rejected"].includes(status)) setStatus("draft");
   };
 
@@ -536,18 +614,28 @@ export default function Home() {
       const pdfjs = await import("pdfjs-dist");
       pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
       const data = await nextFile.arrayBuffer();
-      const loaded = await pdfjs.getDocument({ data }).promise;
+      const loaded = await pdfjs.getDocument({ data: data.slice(0) }).promise;
       setOriginalFileName(nextFile.name);
       setFile(nextFile);
-      setPdf(loaded);
+      setPdf(loaded as unknown as PdfDocumentProxy);
       setPageCount(loaded.numPages);
       setIsSignedPreview(false);
       const first = defaultField(1);
       setFields([first]);
       setSelectedId(first.id);
       setTargetPage(1);
-      setForm((prev) => ({ ...prev, documentName: nextFile.name.replace(/\.pdf$/i, "") }));
+      const nextForm = { ...form, documentName: nextFile.name.replace(/\.pdf$/i, "") };
+      setForm(nextForm);
       setTouched((prev) => ({ ...prev, documentName: true }));
+
+      await saveSessionState({
+        fileBuffer: data,
+        originalFileName: nextFile.name,
+        isSignedPreview: false,
+        status: "draft",
+        form: nextForm,
+        fields: [first],
+      });
     } catch {
       setStatus("error");
       setMessage("Không thể đọc file PDF này. Vui lòng thử một file khác.");
@@ -560,24 +648,32 @@ export default function Home() {
     if (!pageCount) return;
     const existingOnPage = fields.filter((field) => field.page === targetPage).length;
     const item = defaultField(targetPage, existingOnPage);
-    setFields((prev) => [...prev, item]);
+    const nextFields = [...fields, item];
+    setFields(nextFields);
     setSelectedId(item.id);
+    saveSessionState({ fields: nextFields });
     requestAnimationFrame(() => document.getElementById(`pdf-page-${targetPage}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
   };
 
   const updateField = (id: string, patch: Partial<SignatureField>) => {
-    setFields((prev) => prev.map((field) => field.id === id ? { ...field, ...patch } : field));
+    const nextFields = fields.map((field) => field.id === id ? { ...field, ...patch } : field);
+    setFields(nextFields);
+    saveSessionState({ fields: nextFields });
     setStatus("draft");
   };
 
   const removeField = (id: string) => {
-    setFields((prev) => prev.filter((field) => field.id !== id));
+    const nextFields = fields.filter((field) => field.id !== id);
+    setFields(nextFields);
     setSelectedId(null);
+    saveSessionState({ fields: nextFields });
   };
 
-  const createNewRequest = () => {
-    pollingIdRef.current = null;
-    clearPollSchedule();
+  const createNewRequest = async () => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
     setOriginalFileName("");
     setFile(null);
     setPdf(null);
@@ -592,11 +688,12 @@ export default function Home() {
     setActiveRequestId("");
     setCheckingStatus(false);
     setIsReplacingSignedFile(false);
-    autoPollAttemptsRef.current = 0;
-    autoPollingStoppedRef.current = false;
-    setPollAttempt(0);
-    setAutoPollingStopped(false);
+    setQrUrl("");
+    setQrContent("");
+    setSignToken("");
+    setShowQrModal(false);
     if (inputRef.current) inputRef.current.value = "";
+    await clearSessionState();
   };
 
   const downloadSignedPdf = () => {
@@ -633,7 +730,7 @@ export default function Home() {
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!canSubmit || !file) {
-      setTouched({ identificationNumber: true, documentName: true, organizationName: true, taxCode: isBusinessSigning });
+      setTouched({ documentName: true, organizationName: true, taxCode: isBusinessSigning });
       setStatus("error");
       setMessage(validationHint || "Vui lòng kiểm tra lại thông tin trước khi gửi.");
       return;
@@ -645,22 +742,71 @@ export default function Home() {
       setActiveRequestId(signRequestId);
       const body = new FormData();
       body.append("signRequestId", signRequestId);
-      body.append("identificationNumber", form.identificationNumber.trim());
+      if (form.identificationNumber.trim()) {
+        body.append("identificationNumber", form.identificationNumber.trim());
+      }
       body.append("documentName", normalizeDocumentName(form.documentName));
       body.append("organizationName", form.organizationName.trim());
       if (isBusinessSigning) body.append("taxCode", form.taxCode.trim());
-      body.append("signatureFields", JSON.stringify(fields.map(({ id: _id, ...field }) => ({
-        ...field,
+      body.append("signatureFields", JSON.stringify(fields.map((field) => ({
+        page: field.page,
+        xRatio: field.xRatio,
         yRatio: Math.max(0, Math.min(1, 1 - field.yRatio - field.heightRatio)),
+        widthRatio: field.widthRatio,
+        heightRatio: field.heightRatio,
+        fieldType: field.fieldType,
       }))));
       body.append("file", file);
+
       const response = await fetch("/api/esign", { method: "POST", body });
       if (!response.ok) {
         const errorMsg = await parseResponseErrorMessage(response, "Dịch vụ ký số chưa phản hồi thành công.");
         throw new Error(errorMsg);
       }
+
+      const rawText = await response.text();
+      let jsonResult: Record<string, unknown> = {};
+      try {
+        jsonResult = JSON.parse(rawText) as Record<string, unknown>;
+      } catch {
+        jsonResult = {};
+      }
+
+      const pushDoc = (jsonResult.pushSignRequestDocument || jsonResult.requestDocument || (jsonResult.data as Record<string, unknown>)?.pushSignRequestDocument || (jsonResult.data as Record<string, unknown>)?.requestDocument || jsonResult) as Record<string, unknown>;
+      const qrLink = typeof pushDoc?.qrContent === "string" ? pushDoc.qrContent : (typeof pushDoc?.qrCodeUrl === "string" ? pushDoc.qrCodeUrl : "");
+      const token = typeof pushDoc?.signToken === "string" ? pushDoc.signToken : "";
+      let generatedQrUrl = "";
+
+      if (qrLink) {
+        setQrContent(qrLink);
+        setSignToken(token);
+        try {
+          generatedQrUrl = await QRCode.toDataURL(qrLink, {
+            width: 320,
+            margin: 2,
+            color: { dark: "#0f553b", light: "#ffffff" },
+            errorCorrectionLevel: "M",
+          });
+          setQrUrl(generatedQrUrl);
+          setShowQrModal(true);
+        } catch (err) {
+          console.error("QR Code generation error", err);
+        }
+      }
+
       setStatus("sent");
-      setMessage("Hồ sơ đã gửi thành công. Vui lòng thực hiện ký trên Cas ID.");
+      setMessage("Hồ sơ đã gửi thành công. Vui lòng quét mã QR trên ứng dụng Cas ID để ký.");
+
+      await saveSessionState({
+        status: "sent",
+        activeRequestId: signRequestId,
+        qrContent: qrLink,
+        signToken: token,
+        qrUrl: generatedQrUrl,
+        message: "Hồ sơ đã gửi thành công. Vui lòng quét mã QR trên ứng dụng Cas ID để ký.",
+      });
+
+      // Listen for instant Webhook callback via SSE
       listenForWebhookSSE(signRequestId);
     } catch (error) {
       setStatus("error");
@@ -677,11 +823,20 @@ export default function Home() {
           <div className="brand-mark">C</div>
           <div><strong>CAS Sign</strong><span>Ký tài liệu điện tử</span></div>
         </div>
+
+        <nav className="nav-tabs">
+          <Link href="/" className="nav-tab active">
+            <FileSignature size={15} /> Ký tài liệu
+          </Link>
+          <Link href="/lookup" className="nav-tab">
+            <ShieldCheck size={15} /> Tra cứu chữ ký
+          </Link>
+        </nav>
+
         <div className={`status-pill ${status}`}>
           <span className="status-dot" />
           {status === "completed" ? "Ký hoàn tất" : status === "rejected" ? "Từ chối ký" : status === "processing" ? "Đang xử lý" : status === "sent" ? "Đã gửi yêu cầu" : status === "error" ? "Cần kiểm tra" : "Bản nháp"}
         </div>
-        <div className="topbar-spacer" aria-hidden="true" />
       </header>
 
       <form className="workspace" onSubmit={submit}>
@@ -692,14 +847,63 @@ export default function Home() {
           </div>
 
           <div className="fields-grid">
-            <label className="wide-field"><span>CCCD <em>*</em></span><input className={touched.identificationNumber && validationErrors.identificationNumber ? "invalid" : ""} value={form.identificationNumber} onBlur={() => touchField("identificationNumber")} onChange={(e) => setValue("identificationNumber", e.target.value)} placeholder="CCCD / CMND" /></label>
-            {touched.identificationNumber && validationErrors.identificationNumber && <small className="field-error wide-field">{validationErrors.identificationNumber}</small>}
-            <label className="wide-field"><span>Tên tài liệu <em>*</em> <span className="optional-label">Tối thiểu 10 ký tự</span></span><input maxLength={200} disabled={!file || isFileLocked || isSignedPreview} className={touched.documentName && validationErrors.documentName ? "invalid" : ""} value={form.documentName} onBlur={() => { touchField("documentName"); setValue("documentName", normalizeDocumentName(form.documentName)); }} onChange={(e) => setValue("documentName", e.target.value)} placeholder={file ? "Nhập tên tài liệu (tối thiểu 10 ký tự)" : "Upload PDF để nhập tên tài liệu"} /></label>
+            <label className="wide-field">
+              <span>CCCD / CMND <span className="optional-label">Tùy chọn</span></span>
+              <input
+                disabled={isFileLocked || isSignedPreview}
+                value={form.identificationNumber}
+                onChange={(e) => setValue("identificationNumber", e.target.value)}
+                placeholder="CCCD / CMND (Không bắt buộc)"
+              />
+            </label>
+            <label className="wide-field">
+              <span>Tên tài liệu <em>*</em> <span className="optional-label">Tối thiểu 10 ký tự</span></span>
+              <input
+                maxLength={200}
+                disabled={!file || isFileLocked || isSignedPreview}
+                className={touched.documentName && validationErrors.documentName ? "invalid" : ""}
+                value={form.documentName}
+                onBlur={() => { touchField("documentName"); setValue("documentName", normalizeDocumentName(form.documentName)); }}
+                onChange={(e) => setValue("documentName", e.target.value)}
+                placeholder={file ? "Nhập tên tài liệu (tối thiểu 10 ký tự)" : "Upload PDF để nhập tên tài liệu"}
+              />
+            </label>
             {touched.documentName && validationErrors.documentName && <small className="field-error wide-field">{validationErrors.documentName}</small>}
-            <label className="wide-field"><span>Gửi từ <em>*</em></span><input className={touched.organizationName && validationErrors.organizationName ? "invalid" : ""} value={form.organizationName} onBlur={() => touchField("organizationName")} onChange={(e) => setValue("organizationName", e.target.value)} placeholder="Cas Sign" /></label>
+            <label className="wide-field">
+              <span>Gửi từ <em>*</em></span>
+              <input
+                disabled={isFileLocked || isSignedPreview}
+                className={touched.organizationName && validationErrors.organizationName ? "invalid" : ""}
+                value={form.organizationName}
+                onBlur={() => touchField("organizationName")}
+                onChange={(e) => setValue("organizationName", e.target.value)}
+                placeholder="Cas Sign"
+              />
+            </label>
             {touched.organizationName && validationErrors.organizationName && <small className="field-error wide-field">{validationErrors.organizationName}</small>}
-            <label className="business-toggle wide-field"><input type="checkbox" checked={isBusinessSigning} onChange={(e) => { setIsBusinessSigning(e.target.checked); if (!e.target.checked) setTouched((prev) => ({ ...prev, taxCode: false })); }} /><span><strong>Ký doanh nghiệp</strong><small>Yêu cầu mã số thuế</small></span></label>
-            {isBusinessSigning && <label className="wide-field tax-field"><span>Mã số thuế <em>*</em></span><input className={touched.taxCode && validationErrors.taxCode ? "invalid" : ""} value={form.taxCode} onBlur={() => touchField("taxCode")} onChange={(e) => setValue("taxCode", e.target.value)} placeholder="0123456789 hoặc 0123456789-001" inputMode="numeric" /></label>}
+            <label className="business-toggle wide-field">
+              <input
+                type="checkbox"
+                disabled={isFileLocked || isSignedPreview}
+                checked={isBusinessSigning}
+                onChange={(e) => { setIsBusinessSigning(e.target.checked); if (!e.target.checked) setTouched((prev) => ({ ...prev, taxCode: false })); }}
+              />
+              <span><strong>Ký doanh nghiệp</strong><small>Yêu cầu mã số thuế</small></span>
+            </label>
+            {isBusinessSigning && (
+              <label className="wide-field tax-field">
+                <span>Mã số thuế <em>*</em></span>
+                <input
+                  disabled={isFileLocked || isSignedPreview}
+                  className={touched.taxCode && validationErrors.taxCode ? "invalid" : ""}
+                  value={form.taxCode}
+                  onBlur={() => touchField("taxCode")}
+                  onChange={(e) => setValue("taxCode", e.target.value)}
+                  placeholder="0123456789 hoặc 0123456789-001"
+                  inputMode="numeric"
+                />
+              </label>
+            )}
             {isBusinessSigning && touched.taxCode && validationErrors.taxCode && <small className="field-error wide-field">{validationErrors.taxCode}</small>}
           </div>
 
@@ -743,6 +947,17 @@ export default function Home() {
                 <span>{message}</span>
               </div>
             )}
+
+            {["sent", "processing"].includes(status) && qrUrl && (
+              <button
+                type="button"
+                className="view-qr-button"
+                onClick={() => setShowQrModal(true)}
+              >
+                <QrCode size={16} /> Xem lại mã QR ký
+              </button>
+            )}
+
             {["sent", "processing"].includes(status) && activeRequestId && !isReplacingSignedFile && (
               <div className="poll-controls">
                 <button type="button" disabled={checkingStatus} onClick={checkStatusNow}>
@@ -751,6 +966,7 @@ export default function Home() {
                 </button>
               </div>
             )}
+
             {status === "completed" && signedAt && <div className="signed-time">Ký lúc {new Date(signedAt).toLocaleString("vi-VN")}</div>}
             {["completed", "rejected"].includes(status) ? (
               <div className="completed-actions">
@@ -773,14 +989,30 @@ export default function Home() {
         <section className="document-area">
           <div className="document-toolbar">
             <div><span className="step-label">BƯỚC 3</span><h2>Đặt vị trí ký</h2></div>
-            {file && !isSignedPreview && <div className="signature-actions">
-              <div className="page-picker"><span>Trang đang xem</span><select disabled={isFileLocked} value={targetPage} onChange={(e) => setTargetPage(Number(e.target.value))}>{Array.from({ length: pageCount }, (_, i) => <option key={i + 1} value={i + 1}>Trang {i + 1}</option>)}</select><ChevronDown size={14} /></div>
-              <button type="button" disabled={isFileLocked} onClick={addField}><Plus size={16} /> Thêm vùng ký</button>
-              <div className="field-count"><span>{fields.length}</span> vùng</div>
-            </div>}
+            {file && !isSignedPreview && (
+              <div className="signature-actions">
+                <div className="page-picker">
+                  <span>Trang đang xem</span>
+                  <select disabled={isFileLocked} value={targetPage} onChange={(e) => setTargetPage(Number(e.target.value))}>
+                    {Array.from({ length: pageCount }, (_, i) => <option key={i + 1} value={i + 1}>Trang {i + 1}</option>)}
+                  </select>
+                  <ChevronDown size={14} />
+                </div>
+                <button type="button" disabled={isFileLocked} onClick={addField}><Plus size={16} /> Thêm vùng ký</button>
+                <div className="field-count"><span>{fields.length}</span> vùng</div>
+              </div>
+            )}
             {isSignedPreview && <div className="signed-preview-badge"><CheckCircle2 size={15} /> Bản PDF đã ký</div>}
           </div>
-          {isReplacingSignedFile && <div className="replace-file-overlay"><LoaderCircle className="spin" size={30} /><strong>Đang cập nhật file đã ký</strong><span>Vui lòng chờ trong giây lát...</span></div>}
+
+          {isReplacingSignedFile && (
+            <div className="replace-file-overlay">
+              <LoaderCircle className="spin" size={30} />
+              <strong>Đang cập nhật file đã ký</strong>
+              <span>Vui lòng chờ trong giây lát...</span>
+            </div>
+          )}
+
           <div className="document-scroll" ref={documentScrollRef} onScroll={detectVisiblePage}>
             {!pdf ? (
               <div className="empty-preview">
@@ -810,6 +1042,71 @@ export default function Home() {
           </div>
         </section>
       </form>
+
+      {/* QR Code Modal Dialog */}
+      {showQrModal && (
+        <div className="modal-backdrop" onClick={() => setShowQrModal(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3><QrCode size={18} style={{ color: "var(--green)" }} /> Quét mã để ký trên Cas ID</h3>
+              <button className="modal-close" type="button" onClick={() => setShowQrModal(false)}>
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="modal-body">
+              {qrUrl ? (
+                <div className="qr-frame">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={qrUrl} alt="Mã QR ký tài liệu" className="qr-image" />
+                </div>
+              ) : (
+                <div className="qr-frame" style={{ width: 220, height: 220, display: "grid", placeItems: "center" }}>
+                  <LoaderCircle className="spin" size={32} />
+                </div>
+              )}
+
+              {signToken && (
+                <div className="qr-token-pill">
+                  Mã ký số: <strong>{signToken}</strong>
+                </div>
+              )}
+
+              <div className="qr-actions-row">
+                <button
+                  type="button"
+                  className={`qr-btn secondary ${copiedLink ? "copied" : ""}`}
+                  onClick={copyQrLink}
+                >
+                  <Copy size={14} /> {copiedLink ? "Đã sao chép link!" : "Sao chép link ký"}
+                </button>
+              </div>
+
+              <div className="qr-poll-status waiting">
+                <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700 }}>
+                  <LoaderCircle className="spin" size={14} />
+                  <span>Đang chờ bạn mở Cas ID và xác nhận ký...</span>
+                </div>
+                <span style={{ fontSize: 10, color: "#6e6245" }}>
+                  Hệ thống tự động cập nhật ngay khi bạn ký xong trên app qua Webhook.
+                </span>
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <span style={{ fontSize: 10, color: "#7a8a81" }}>Mã yêu cầu: <code>{activeRequestId}</code></span>
+              <button
+                type="button"
+                className="qr-btn primary"
+                style={{ flex: "0 0 auto", height: 32, padding: "0 14px" }}
+                onClick={() => setShowQrModal(false)}
+              >
+                Đóng popup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

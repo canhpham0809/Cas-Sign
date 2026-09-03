@@ -180,14 +180,15 @@ const extractBase64String = (input: unknown): string | null => {
     }
   }
   if (input && typeof input === "object") {
+    const obj = input as Record<string, unknown>;
     const keysToTry = ["file", "data", "fileContent", "file_content", "pdfBase64", "pdf_base64", "base64", "base64Data", "base64_data", "content", "document", "signedFile", "signed_file"];
     for (const key of keysToTry) {
-      if ((input as Record<string, any>)[key]) {
-        const found = extractBase64String((input as Record<string, any>)[key]);
+      if (obj[key]) {
+        const found = extractBase64String(obj[key]);
         if (found) return found;
       }
     }
-    for (const val of Object.values(input as Record<string, any>)) {
+    for (const val of Object.values(obj)) {
       const found = extractBase64String(val);
       if (found) return found;
     }
@@ -208,8 +209,8 @@ const fetchAndCacheSignedPdf = async (env: Env, identityKey: string): Promise<Re
       console.warn("[esign.download] missing credentials", { identityKey });
       return Response.json({ message: "Máy chủ chưa được cấu hình thông tin kết nối API ký số." }, { status: 500 });
     }
-    const apiBase = (env.ESIGN_API_URL || "https://production.bankhub.dev/esign/push-request-document")
-      .replace(/\/(push-request-document|download-file|request-status)\/?$/, "");
+    const apiBase = (env.ESIGN_API_URL || "https://production.bankhub.dev/esign/request-document")
+      .replace(/\/(push-request-document|request-document|download-file|request-status|signing-round)\/?$/, "");
 
     console.info("[esign.download] calling BankHub download-file API", {
       identityKey,
@@ -307,7 +308,7 @@ const worker = {
       }
       try {
         const formData = await request.formData();
-        const upstreamUrl = env.ESIGN_API_URL || "https://production.bankhub.dev/esign/push-request-document";
+        const upstreamUrl = env.ESIGN_API_URL || "https://production.bankhub.dev/esign/request-document";
         const uploadedFile = formData.get("file");
         const signatureFieldsValue = formData.get("signatureFields");
         const documentNameValue = formData.get("documentName");
@@ -413,21 +414,21 @@ const worker = {
             return Response.json({ ok: true, message: "Webhook ping received", traceId });
           }
 
-          let payload: Record<string, any> = {};
+          let payload: Record<string, unknown> = {};
           try {
-            payload = JSON.parse(rawText) as Record<string, any>;
+            payload = JSON.parse(rawText) as Record<string, unknown>;
           } catch {
             return Response.json({ ok: true, message: "Webhook ping received", traceId });
           }
 
-          const signRequest = (payload.signRequest || payload) as Record<string, any>;
-          const signRequestId = signRequest.signRequestId || signRequest.sign_request_id;
+          const signRequest = ((payload.signRequest || payload) || {}) as Record<string, unknown>;
+          const signRequestId = (signRequest.signRequestId || signRequest.sign_request_id) as string | undefined;
           const nextState = String(signRequest.state || payload.state || "").toUpperCase();
-          const identityKey = signRequest.identityKey || signRequest.identity_key || payload.identityKey || payload.identity_key;
-          const identityKeyExpiresAt = signRequest.identityKeyExpiresAt || signRequest.identity_key_expires_at || payload.identityKeyExpiresAt || payload.identity_key_expires_at;
-          const signedFileUrl = signRequest.signedFileUrl || signRequest.signed_file_url || payload.signedFileUrl || payload.signed_file_url;
-          const rejectedReason = signRequest.rejectedReason || signRequest.rejected_reason || payload.rejectedReason || payload.rejected_reason;
-          const expiresIn = signRequest.expiresIn || signRequest.expires_in || payload.expiresIn || payload.expires_in;
+          const identityKey = (signRequest.identityKey || signRequest.identity_key || payload.identityKey || payload.identity_key) as string | undefined;
+          const identityKeyExpiresAt = (signRequest.identityKeyExpiresAt || signRequest.identity_key_expires_at || payload.identityKeyExpiresAt || payload.identity_key_expires_at) as string | undefined;
+          const signedFileUrl = (signRequest.signedFileUrl || signRequest.signed_file_url || payload.signedFileUrl || payload.signed_file_url) as string | undefined;
+          const rejectedReason = (signRequest.rejectedReason || signRequest.rejected_reason || payload.rejectedReason || payload.rejected_reason) as string | undefined;
+          const expiresIn = (signRequest.expiresIn || signRequest.expires_in || payload.expiresIn || payload.expires_in) as number | undefined;
 
           // If this is a test ping / verification from BankHub Console
           if (!signRequestId || !nextState || !["COMPLETED", "REJECTED"].includes(nextState)) {
@@ -485,8 +486,8 @@ const worker = {
         if (!env.ESIGN_CLIENT_ID || !env.ESIGN_SECRET_KEY) {
           return Response.json({ message: "Máy chủ chưa được cấu hình thông tin kết nối API ký số." }, { status: 500 });
         }
-        const apiBase = (env.ESIGN_API_URL || "https://production.bankhub.dev/esign/push-request-document")
-          .replace(/\/(push-request-document|download-file|request-status)\/?$/, "");
+        const apiBase = (env.ESIGN_API_URL || "https://production.bankhub.dev/esign/request-document")
+          .replace(/\/(push-request-document|request-document|download-file|request-status|signing-round)\/?$/, "");
         const upstream = await fetch(`${apiBase}/request-status`, {
           method: "POST",
           headers: {
@@ -501,19 +502,19 @@ const worker = {
         if (upstream.ok) {
           try {
             const rawText = new TextDecoder().decode(payload);
-            const parsed = JSON.parse(rawText) as Record<string, any>;
-            const upstreamStatus = parsed.signRequestStatus || (parsed.signRequestId || parsed.state ? parsed : parsed.data);
+            const parsed = JSON.parse(rawText) as Record<string, unknown>;
+            const upstreamStatus = (parsed.signRequestStatus || (parsed.signRequestId || parsed.state ? parsed : parsed.data)) as Record<string, unknown> | undefined;
             if (upstreamStatus?.state && ["COMPLETED", "REJECTED"].includes(String(upstreamStatus.state).toUpperCase())) {
               const state = String(upstreamStatus.state).toUpperCase();
               const normalizedStatus: StoredSignStatus = {
-                signRequestId: upstreamStatus.signRequestId || signRequestId,
+                signRequestId: (upstreamStatus.signRequestId as string) || signRequestId,
                 state,
-                signedFileUrl: upstreamStatus.signedFileUrl || storedStatus?.signedFileUrl,
-                identityKey: upstreamStatus.identityKey || storedStatus?.identityKey,
-                identityKeyExpiresAt: upstreamStatus.identityKeyExpiresAt || storedStatus?.identityKeyExpiresAt,
-                expiresIn: upstreamStatus.expiresIn || storedStatus?.expiresIn,
-                rejectedReason: upstreamStatus.rejectedReason || storedStatus?.rejectedReason,
-                lastUpdatedAt: upstreamStatus.lastUpdatedAt || new Date().toISOString(),
+                signedFileUrl: (upstreamStatus.signedFileUrl as string) || storedStatus?.signedFileUrl,
+                identityKey: (upstreamStatus.identityKey as string) || storedStatus?.identityKey,
+                identityKeyExpiresAt: (upstreamStatus.identityKeyExpiresAt as string) || storedStatus?.identityKeyExpiresAt,
+                expiresIn: (upstreamStatus.expiresIn as number) || storedStatus?.expiresIn,
+                rejectedReason: (upstreamStatus.rejectedReason as string) || storedStatus?.rejectedReason,
+                lastUpdatedAt: (upstreamStatus.lastUpdatedAt as string) || new Date().toISOString(),
               };
               ctx.waitUntil(saveSignStatus(env, normalizedStatus));
               return Response.json({ requestId: "upstream-api", signRequestStatus: normalizedStatus, ...parsed });
@@ -531,6 +532,45 @@ const worker = {
         return new Response(payload, { status: upstream.status, headers: { "content-type": contentType } });
       } catch (error) {
         return Response.json({ message: error instanceof Error ? error.message : "Không thể lấy trạng thái ký." }, { status: 502 });
+      }
+    }
+
+    if (url.pathname.startsWith("/api/esign/signing-round") && request.method === "GET") {
+      let orgIdSigned = "";
+      if (url.pathname.startsWith("/api/esign/signing-round/")) {
+        orgIdSigned = decodeURIComponent(url.pathname.slice("/api/esign/signing-round/".length));
+      }
+      if (!orgIdSigned) {
+        orgIdSigned = url.searchParams.get("orgIdSigned") || "";
+      }
+      if (!orgIdSigned) {
+        return Response.json({ message: "Thiếu mã orgIdSigned để tra cứu." }, { status: 400 });
+      }
+      if (!env.ESIGN_CLIENT_ID || !env.ESIGN_SECRET_KEY) {
+        return Response.json({ message: "Máy chủ chưa được cấu hình thông tin kết nối API ký số." }, { status: 500 });
+      }
+      const apiBase = (env.ESIGN_API_URL || "https://production.bankhub.dev/esign/request-document")
+        .replace(/\/(push-request-document|request-document|download-file|request-status|signing-round)\/?$/, "");
+      const language = url.searchParams.get("language") || request.headers.get("language") || "vi";
+
+      try {
+        const upstream = await fetch(`${apiBase}/signing-round/${encodeURIComponent(orgIdSigned)}`, {
+          method: "GET",
+          headers: {
+            "x-client-id": env.ESIGN_CLIENT_ID,
+            "x-secret-key": env.ESIGN_SECRET_KEY,
+            "language": language,
+          },
+        });
+        const contentType = upstream.headers.get("content-type") || "application/json";
+        const payload = await upstream.arrayBuffer();
+        return new Response(payload, {
+          status: upstream.status,
+          headers: { "content-type": contentType },
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Không thể tra cứu thông tin chữ ký.";
+        return Response.json({ message }, { status: 502 });
       }
     }
 
