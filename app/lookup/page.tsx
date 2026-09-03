@@ -76,7 +76,7 @@ export default function LookupPage() {
       const response = await fetch(`/api/esign/signing-round?orgIdSigned=${encodeURIComponent(queryId)}&language=vi`, {
         cache: "no-store",
       });
-      const data = await response.json();
+      const data = (await response.json()) as SigningRoundData;
       if (!response.ok) {
         throw new Error(data.errorMessage || data.message || data.error || `Tra cứu thất bại (HTTP ${response.status})`);
       }
