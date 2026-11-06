@@ -813,7 +813,7 @@ input.invalid {
 .document-scroll {
   flex: 1;
   overflow: auto;
-  padding: 34px;
+  padding: 24px 20px 32px;
 }
 
 .empty-preview {
@@ -883,13 +883,15 @@ input.invalid {
 .pdf-stack {
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 24px;
   align-items: center;
+  /* Khi zoom lớn hơn khung, stack nở theo nội dung để cuộn ngang được cả 2 phía. */
+  width: fit-content;
+  min-width: 100%;
 }
 
 .pdf-page-wrap {
   position: relative;
-  max-width: 100%;
 }
 
 .page-number {
@@ -904,13 +906,57 @@ input.invalid {
   line-height: 0;
   background: white;
   box-shadow: 0 12px 35px #20382d1c;
-  max-width: 100%;
 }
 
 .pdf-page canvas {
   display: block;
-  max-width: 100%;
-  height: auto !important;
+}
+
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.zoom-controls {
+  display: flex;
+  align-items: center;
+  height: 34px;
+  border: 1px solid #d5ded9;
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.zoom-controls button {
+  height: 100%;
+  min-width: 34px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: #3d4842;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.zoom-controls button:hover:not(:disabled) {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.zoom-controls button:disabled {
+  color: #b8c0bb;
+  cursor: not-allowed;
+}
+
+.zoom-controls .zoom-value {
+  min-width: 52px;
+  border-left: 1px solid #e3e9e5;
+  border-right: 1px solid #e3e9e5;
+  font-variant-numeric: tabular-nums;
 }
 
 .signature-box {
@@ -1575,6 +1621,19 @@ input.invalid {
   .lookup-grid {
     grid-template-columns: 1fr;
   }
+
+  .document-toolbar {
+    height: auto;
+    min-height: 64px;
+    padding: 10px 24px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .toolbar-right {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
 }
 
 @media (max-width:560px) {
@@ -1609,7 +1668,7 @@ input.invalid {
   }
 
   .document-toolbar {
-    padding: 0 17px;
+    padding: 10px 17px;
   }
 
   .status-pill {

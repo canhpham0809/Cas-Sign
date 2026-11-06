@@ -27,6 +27,8 @@ import {
   Users,
   X,
   XCircle,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import { clearSessionState, loadSessionState, saveSessionState } from "./session-storage";
 import {
@@ -256,9 +258,15 @@ function RequestIdChip({ id }: { id: string }) {
   );
 }
 
-function PdfPage({ pdf, pageNumber, fields, selectedId, invalidIds, locked, onSelect, onMove, onResize, onDelete }: {
+const ZOOM_STEPS = [0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+/** Trần chiều rộng khi "vừa khung" để trang không quá to trên màn hình rất rộng. */
+const MAX_FIT_WIDTH = 1400;
+
+function PdfPage({ pdf, pageNumber, displayWidth, fields, selectedId, invalidIds, locked, onSelect, onMove, onResize, onDelete }: {
   pdf: PdfDocumentProxy;
   pageNumber: number;
+  /** Chiều rộng hiển thị (CSS px) của trang = vừa khung xem × mức zoom. */
+  displayWidth: number;
   fields: SignatureField[];
   selectedId: string | null;
   invalidIds: Set<string>;
@@ -279,7 +287,7 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, invalidIds, locked, onSe
         const page = await pdf.getPage(pageNumber);
         if (cancelled || !canvasRef.current) return;
         const base = page.getViewport({ scale: 1 });
-        const scale = Math.min(1.35, 760 / base.width);
+        const scale = (displayWidth > 0 ? displayWidth : 760) / base.width;
         const viewport = page.getViewport({ scale });
         const canvas = canvasRef.current;
         const ratio = window.devicePixelRatio || 1;
@@ -302,7 +310,7 @@ function PdfPage({ pdf, pageNumber, fields, selectedId, invalidIds, locked, onSe
       cancelled = true;
       renderTask?.cancel?.();
     };
-  }, [pdf, pageNumber]);
+  }, [pdf, pageNumber, displayWidth]);
 
   const startDrag = (event: React.PointerEvent, field: SignatureField) => {
     if (locked) return;
@@ -394,6 +402,8 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [pdf, setPdf] = useState<PdfDocumentProxy | null>(null);
   const [pageCount, setPageCount] = useState(0);
+  const [zoom, setZoom] = useState(1);
+  const [fitWidth, setFitWidth] = useState(0);
   const [fields, setFields] = useState<SignatureField[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [targetPage, setTargetPage] = useState(1);
@@ -850,6 +860,44 @@ export default function Home() {
     setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
   };
 
+  // Đo chiều rộng khả dụng của vùng xem PDF để trang co giãn vừa khung (thay vì cố định 760px).
+  useEffect(() => {
+    const el = documentScrollRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const measure = () => {
+      const style = getComputedStyle(el);
+      const inner = el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      setFitWidth(Math.max(240, Math.min(MAX_FIT_WIDTH, Math.floor(inner))));
+    };
+    measure();
+    const observer = new ResizeObserver(() => {
+      clearTimeout(timer);
+      timer = setTimeout(measure, 120);
+    });
+    observer.observe(el);
+    return () => {
+      clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, []);
+
+  const changeZoom = (next: number) => {
+    const el = documentScrollRef.current;
+    const clamped = Math.min(ZOOM_STEPS[ZOOM_STEPS.length - 1], Math.max(ZOOM_STEPS[0], next));
+    if (clamped === zoom) return;
+    // Giữ vị trí đang đọc theo tỉ lệ cuộn dọc, căn giữa theo chiều ngang sau khi zoom.
+    const ratio = el && el.scrollHeight > el.clientHeight ? el.scrollTop / (el.scrollHeight - el.clientHeight) : 0;
+    setZoom(clamped);
+    setTimeout(() => {
+      if (!el) return;
+      el.scrollTop = ratio * (el.scrollHeight - el.clientHeight);
+      el.scrollLeft = (el.scrollWidth - el.clientWidth) / 2;
+    }, 80);
+  };
+  const zoomIn = () => changeZoom(ZOOM_STEPS.find((step) => step > zoom + 0.001) ?? zoom);
+  const zoomOut = () => changeZoom([...ZOOM_STEPS].reverse().find((step) => step < zoom - 0.001) ?? zoom);
+
   const detectVisiblePage = () => {
     const scrollArea = documentScrollRef.current;
     if (!scrollArea || !pageCount || isSignedPreview) return;
@@ -1211,12 +1259,21 @@ export default function Home() {
         <section className="document-area">
           <div className="document-toolbar">
             <div><span className="step-label">BƯỚC 3</span><h2>Đặt vị trí ký</h2></div>
+            <div className="toolbar-right">
             {file && !isSignedPreview && <div className="signature-actions">
               <div className="page-picker"><span>Trang đang xem</span><select disabled={isFileLocked} value={targetPage} onChange={(e) => setTargetPage(Number(e.target.value))}>{Array.from({ length: pageCount }, (_, i) => <option key={i + 1} value={i + 1}>Trang {i + 1}</option>)}</select><ChevronDown size={14} /></div>
               <button type="button" disabled={isFileLocked} onClick={addField}><Plus size={16} /> Thêm vùng ký</button>
               <div className="field-count"><span>{fields.length}</span> vùng</div>
             </div>}
             {isSignedPreview && <div className="signed-preview-badge"><CheckCircle2 size={15} /> Bản PDF đã ký</div>}
+            {pdf && (
+              <div className="zoom-controls" role="group" aria-label="Thu phóng tài liệu">
+                <button type="button" onClick={zoomOut} disabled={zoom <= ZOOM_STEPS[0]} title="Thu nhỏ" aria-label="Thu nhỏ"><ZoomOut size={16} /></button>
+                <button type="button" className="zoom-value" onClick={() => changeZoom(1)} title="Vừa khung (100%)">{Math.round(zoom * 100)}%</button>
+                <button type="button" onClick={zoomIn} disabled={zoom >= ZOOM_STEPS[ZOOM_STEPS.length - 1]} title="Phóng to" aria-label="Phóng to"><ZoomIn size={16} /></button>
+              </div>
+            )}
+            </div>
           </div>
           {isReplacingSignedFile && <div className="replace-file-overlay"><LoaderCircle className="spin" size={30} /><strong>Đang cập nhật file đã ký</strong><span>Vui lòng chờ trong giây lát...</span></div>}
           <div className="document-scroll" ref={documentScrollRef} onScroll={detectVisiblePage}>
@@ -1234,6 +1291,7 @@ export default function Home() {
                     key={index + 1}
                     pdf={pdf}
                     pageNumber={index + 1}
+                    displayWidth={Math.round(fitWidth * zoom)}
                     fields={fields.filter((field) => field.page === index + 1)}
                     selectedId={selectedId}
                     invalidIds={invalidFieldIds}
