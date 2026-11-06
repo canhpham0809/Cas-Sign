@@ -2,6 +2,7 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import { DurableObject } from "cloudflare:workers";
+import { ERROR_CODES, validateSignType, validateSignatureFields } from "../lib/request-document";
 
 interface Env {
   ASSETS: Fetcher;
@@ -28,6 +29,8 @@ type StoredSignStatus = {
   identityKeyExpiresAt?: string;
   expiresIn?: number;
   rejectedReason?: string;
+  /** Thời điểm ký thật (UTC). Không dùng lastUpdatedAt thay thế: sandbox trả lastUpdatedAt giờ VN nhưng gắn hậu tố Z. */
+  signedAt?: string;
   lastUpdatedAt: string;
 };
 
@@ -312,6 +315,31 @@ const worker = {
         const uploadedFile = formData.get("file");
         const signatureFieldsValue = formData.get("signatureFields");
         const documentNameValue = formData.get("documentName");
+        const signRequestIdValue = formData.get("signRequestId");
+
+        // Validate trước khi forward để trả lỗi sớm, cùng format với eSign API:
+        // HTTP 400 { requestId, errorType, errorCode, errorMessage }.
+        const validationError = (errorCode: string, problems: string[]) => {
+          console.warn("[esign.push] rejected by local validation", { traceId, errorCode, problems });
+          return Response.json(
+            {
+              requestId: typeof signRequestIdValue === "string" ? signRequestIdValue : traceId,
+              errorType: "VALIDATION_ERROR",
+              errorCode,
+              errorMessage: problems.join(", "),
+            },
+            { status: 400, headers: { "x-cas-trace-id": traceId } },
+          );
+        };
+        const paramProblems: string[] = [];
+        const signTypeProblem = validateSignType(formData.get("signType"));
+        if (signTypeProblem) paramProblems.push(signTypeProblem);
+        if (typeof signatureFieldsValue !== "string" || !signatureFieldsValue.trim()) paramProblems.push("signatureFields là bắt buộc");
+        if (!(uploadedFile instanceof File)) paramProblems.push("file là bắt buộc");
+        if (paramProblems.length) return validationError(ERROR_CODES.INVALID_PARAM, paramProblems);
+        const fieldProblems = validateSignatureFields(signatureFieldsValue);
+        if (fieldProblems.length) return validationError(ERROR_CODES.SIGNATURE_FIELDS_INVALID, fieldProblems);
+
         let signatureFieldCount: number | null = null;
         if (typeof signatureFieldsValue === "string") {
           try {
@@ -429,6 +457,7 @@ const worker = {
           const signedFileUrl = (signRequest.signedFileUrl || signRequest.signed_file_url || payload.signedFileUrl || payload.signed_file_url) as string | undefined;
           const rejectedReason = (signRequest.rejectedReason || signRequest.rejected_reason || payload.rejectedReason || payload.rejected_reason) as string | undefined;
           const expiresIn = (signRequest.expiresIn || signRequest.expires_in || payload.expiresIn || payload.expires_in) as number | undefined;
+          const signedAt = (signRequest.signedAt || signRequest.signed_at || payload.signedAt || payload.signed_at) as string | undefined;
 
           // If this is a test ping / verification from BankHub Console
           if (!signRequestId || !nextState || !["COMPLETED", "REJECTED"].includes(nextState)) {
@@ -451,6 +480,7 @@ const worker = {
             identityKeyExpiresAt,
             expiresIn,
             rejectedReason,
+            signedAt,
             lastUpdatedAt: new Date().toISOString(),
           };
 
@@ -514,6 +544,7 @@ const worker = {
                 identityKeyExpiresAt: (upstreamStatus.identityKeyExpiresAt as string) || storedStatus?.identityKeyExpiresAt,
                 expiresIn: (upstreamStatus.expiresIn as number) || storedStatus?.expiresIn,
                 rejectedReason: (upstreamStatus.rejectedReason as string) || storedStatus?.rejectedReason,
+                signedAt: (upstreamStatus.signedAt as string) || storedStatus?.signedAt,
                 lastUpdatedAt: (upstreamStatus.lastUpdatedAt as string) || new Date().toISOString(),
               };
               ctx.waitUntil(saveSignStatus(env, normalizedStatus));

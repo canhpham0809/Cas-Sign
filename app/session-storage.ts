@@ -1,4 +1,5 @@
 // Client-side IndexedDB persistence for Cas Sign session
+import type { FieldType, SignType } from "../lib/request-document";
 
 const DB_NAME = "CasSignDB";
 const STORE_NAME = "sessionStore";
@@ -11,7 +12,10 @@ export type PersistedSession = {
     organizationName: string;
     taxCode: string;
   };
+  /** @deprecated kept to restore sessions saved before signType existed. */
   isBusinessSigning: boolean;
+  /** "" = không chỉ định, người ký tự chọn. */
+  signType?: "" | SignType;
   fileBuffer?: ArrayBuffer;
   originalFileName?: string;
   fields: Array<{
@@ -21,7 +25,7 @@ export type PersistedSession = {
     yRatio: number;
     widthRatio: number;
     heightRatio: number;
-    fieldType: "SIGNATURE";
+    fieldType: FieldType;
   }>;
   status: "draft" | "sent" | "processing" | "completed" | "rejected" | "error";
   message: string;
@@ -51,12 +55,25 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-export async function saveSessionState(session: Partial<PersistedSession>): Promise<void> {
+// Mọi lần ghi (save/clear) chạy tuần tự. Nếu không, hai lần save gần nhau cùng đọc bản cũ
+// rồi ghi đè nhau (VD: chọn loại ký rồi gõ MST ngay -> mất signType).
+let writeQueue: Promise<void> = Promise.resolve();
+const enqueue = (task: () => Promise<void>): Promise<void> => {
+  writeQueue = writeQueue.then(task, task);
+  return writeQueue;
+};
+
+export function saveSessionState(session: Partial<PersistedSession>): Promise<void> {
+  return enqueue(() => writeSessionState(session));
+}
+
+async function writeSessionState(session: Partial<PersistedSession>): Promise<void> {
   try {
     const existing = await loadSessionState();
     const merged: PersistedSession = {
       form: session.form ?? existing?.form ?? { identificationNumber: "", documentName: "", organizationName: "Cas Sign", taxCode: "" },
       isBusinessSigning: session.isBusinessSigning ?? existing?.isBusinessSigning ?? false,
+      signType: session.signType ?? existing?.signType,
       fileBuffer: session.fileBuffer !== undefined ? session.fileBuffer : existing?.fileBuffer,
       originalFileName: session.originalFileName ?? existing?.originalFileName ?? "",
       fields: session.fields ?? existing?.fields ?? [],
@@ -98,7 +115,11 @@ export async function loadSessionState(): Promise<PersistedSession | null> {
   }
 }
 
-export async function clearSessionState(): Promise<void> {
+export function clearSessionState(): Promise<void> {
+  return enqueue(removeSessionState);
+}
+
+async function removeSessionState(): Promise<void> {
   try {
     const db = await openDb();
     const tx = db.transaction(STORE_NAME, "readwrite");

@@ -13,7 +13,9 @@ test("validates application build artifacts and components", async () => {
   // Check home page features
   assert.match(page, /CAS Sign/);
   assert.match(page, /quét mã QR/i);
-  assert.match(page, /listenForWebhookSSE/);
+  assert.match(page, /new EventSource\(`\/api\/esign\/stream\//);
+  assert.match(page, /signType/);
+  assert.match(page, /Huỷ yêu cầu/);
   assert.match(page, /qrcode/);
   assert.match(page, /session-storage/);
 
@@ -28,6 +30,8 @@ test("validates application build artifacts and components", async () => {
   assert.match(worker, /\/api\/esign\/signing-round/);
   assert.match(worker, /\/api\/esign\/webhook/);
   assert.match(worker, /\/api\/esign\/signed-file/);
+  assert.match(worker, /validateSignType/);
+  assert.doesNotMatch(worker, /https:\/\/sandbox\.bankhub\.dev/);
 
   // Check package.json dependencies
   assert.match(packageJson, /"qrcode"/);
